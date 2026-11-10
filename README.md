@@ -6,6 +6,8 @@ Free, open source text to speech app for macOS. A text pasted into the window or
 
 Apple silicon, macOS 13 or later. Interface in English, Ukrainian and Russian. Signed with a Developer ID and notarized by Apple.
 
+![TTS in use: page 2 of Lincoln's Gettysburg Address in his own hand (the Bliss copy) in Preview, and TTS reading the speech with Siri's Voice 1, the sentence “The world will little note, nor long remember what we say here” highlighted, dark appearance](docs/scene.webp)
+
 ## Install
 
 Download `TTS.dmg` from [Releases](https://github.com/geragarazagh/tts/releases/latest), open it and drag `TTS.app` to Applications. Later versions arrive through Check for Updates.
