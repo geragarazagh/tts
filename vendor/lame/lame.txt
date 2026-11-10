@@ -1,0 +1,14 @@
+libmp3lame.0.dylib here is LAME 4.0 (LGPL-2.0), unchanged, built 2026-11-09 on macOS 27.2 with Xcode's clang:
+
+  curl -fsSLO https://downloads.sourceforge.net/project/lame/lame/4.0/lame-4.0.tar.gz
+  # SHA-256 3df5124d5ad3a98312ffd7ba6a9b36230e4f8a3e66d3ce0f425e336c32d216eb (the same Homebrew pins)
+  tar xzf lame-4.0.tar.gz && cd lame-4.0
+  # configure insists on pkg-config though nothing here needs it; a stub that answers its version check is enough
+  printf '#!/bin/sh\ncase "$1" in --version) echo 0.29.2;; --atleast-pkgconfig-version) exit 0;; *) exit 1;; esac\n' > /tmp/pkgshim; chmod +x /tmp/pkgshim
+  PKG_CONFIG=/tmp/pkgshim CFLAGS="-O2 -arch arm64 -mmacosx-version-min=13.0" LDFLAGS="-arch arm64 -mmacosx-version-min=13.0" \
+    ./configure --prefix=$PWD/out --enable-shared --disable-static --disable-frontend --disable-decoder --disable-gtktest
+  make -j8 && make install
+  install_name_tool -id @rpath/libmp3lame.0.dylib out/lib/libmp3lame.0.dylib
+
+Any other build of the same library can replace it in TTS.app/Contents/Frameworks (re-sign the app afterwards).
+lame.h is the header of the same release; COPYING its licence.

@@ -1,0 +1,6 @@
+module COnnxRuntime {
+    header "onnxruntime_c_api.h"
+    header "coreml_provider_factory.h"
+    link "onnxruntime"
+    export *
+}

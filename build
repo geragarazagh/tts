@@ -1,0 +1,129 @@
+#!/bin/zsh
+# Builds TTS.app in this folder. Needs the Xcode Command Line Tools; the icon also needs full Xcode (actool).
+set -e
+cd "${0:A:h}"
+# It changes per release, not per build.
+# min 13.3: ONNX Runtime 1.22 is the newest release whose macOS library loads on 13 (13.3, the first 13 with
+# std::to_chars for floats); 1.23 asks for 13.4, 1.24 and newer for 14 (measured with otool, 2026-11-09).
+version=0.1 min=13.3 id=com.geragaraza.tts app=TTS.app ort=1.22.0
+tmp=$(mktemp -d); trap 'rm -rf $tmp' EXIT
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
+
+# ONNX Runtime (MIT, Microsoft), the official macOS arm64 release; the C API header is in vendor/onnxruntime/include.
+if [ ! -f vendor/onnxruntime/lib/libonnxruntime.$ort.dylib ]; then
+  curl -fsSL -o $tmp/ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v$ort/onnxruntime-osx-arm64-$ort.tgz
+  tar -xzf $tmp/ort.tgz -C $tmp
+  mkdir -p vendor/onnxruntime/lib
+  cp $tmp/onnxruntime-osx-arm64-$ort/lib/libonnxruntime.$ort.dylib vendor/onnxruntime/lib/
+  ln -sf libonnxruntime.$ort.dylib vendor/onnxruntime/lib/libonnxruntime.dylib
+fi
+cp vendor/onnxruntime/lib/libonnxruntime.$ort.dylib "$app/Contents/Frameworks/"
+# LAME 4.0 (LGPL), built from its source for 13.0 arm64 as a separate library (vendor/lame; how: lame.txt).
+cp vendor/lame/lib/libmp3lame.0.dylib "$app/Contents/Frameworks/"
+
+# Updates: Sparkle, from its release, checked against a pinned checksum (as the other apps).
+sparkle=2.10.1 sparkle_sha=1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27
+if [ ! -d vendor/Sparkle.framework ]; then
+  mkdir -p vendor $tmp/sparkle
+  curl -fsSL -o $tmp/sparkle.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/$sparkle/Sparkle-$sparkle.tar.xz
+  [ "$(shasum -a 256 $tmp/sparkle.tar.xz | cut -d' ' -f1)" = $sparkle_sha ] || { echo "Sparkle checksum mismatch"; exit 1; }
+  tar -xf $tmp/sparkle.tar.xz -C $tmp/sparkle Sparkle.framework
+  ditto $tmp/sparkle/Sparkle.framework vendor/Sparkle.framework
+fi
+sp=$app/Contents/Frameworks/Sparkle.framework
+ditto vendor/Sparkle.framework "$sp"
+rm -rf "$sp"/{XPCServices,Headers,PrivateHeaders,Modules} "$sp"/Versions/B/{XPCServices,Headers,PrivateHeaders,Modules}
+for b in Sparkle Autoupdate Updater.app/Contents/MacOS/Updater; do
+  lipo "$sp/Versions/B/$b" -thin arm64 -output $tmp/thin && cp $tmp/thin "$sp/Versions/B/$b"
+done
+
+swiftc -O -target arm64-apple-macos$min -module-name TTS -parse-as-library \
+  -I vendor/onnxruntime/include -L vendor/onnxruntime/lib -I vendor/lame/include -L vendor/lame/lib -F vendor -framework Sparkle \
+  -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
+  -o "$app/Contents/MacOS/TTS" app.swift common.swift window.swift engine.swift speech.swift player.swift model.swift download.swift \
+  text.swift mp3.swift stretch.swift samples.swift updates.swift 2>&1 | grep -E "error" || true
+[ -x "$app/Contents/MacOS/TTS" ]
+
+# Icon, as STT: icon.swift draws the picture, Icon Composer's format, actool compiles it (see STT's build for why
+# glass, shadow and translucency are off and why the light picture is the entry without an appearance).
+xc=/Applications/Xcode.app/Contents
+swiftc -O -o $tmp/icon icon.swift
+mkdir -p $tmp/AppIcon.icon/Assets docs
+$tmp/icon $tmp/AppIcon.icon/Assets docs/wave.svg
+cat > $tmp/AppIcon.icon/icon.json <<'JSON'
+{
+  "fill" : "system-light",
+  "fill-specializations" : [ { "appearance" : "dark", "value" : "system-dark" } ],
+  "groups" : [ { "layers" : [ { "name" : "picture", "glass" : false,
+    "image-name-specializations" : [ { "value" : "light.png" }, { "appearance" : "dark", "value" : "dark.png" } ] } ],
+    "shadow" : { "kind" : "none", "opacity" : 0.5 }, "translucency" : { "enabled" : false, "value" : 0.5 } } ],
+  "supported-platforms" : { "squares" : [ "macOS" ] }
+}
+JSON
+DEVELOPER_DIR=$xc/Developer xcrun actool $tmp/AppIcon.icon --compile "$PWD/$app/Contents/Resources" --platform macosx \
+  --minimum-deployment-target $min --app-icon AppIcon --output-partial-info-plist $tmp/icon.plist --target-device mac >/dev/null
+for r in Default Dark; do
+  "$xc/Applications/Icon Composer.app/Contents/Executables/ictool" $tmp/AppIcon.icon --export-image --output-file $tmp/$r.png \
+    --platform macOS --rendition $r --width 206 --height 206 --scale 1 >/dev/null
+  sips -p 256 256 $tmp/$r.png --out docs/icon${${r:#Default}:+-dark}.png >/dev/null
+done
+cp LICENSE THIRD-PARTY-LICENSES.md "$app/Contents/Resources/" 2>/dev/null || true
+
+# Text files of every kind open in TTS from Finder's Open With and by dropping on the Dock icon. Alternate: never the
+# default app for a type someone else owns.
+cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>$id</string>
+<key>CFBundleName</key><string>TTS</string>
+<key>CFBundleDisplayName</key><string>TTS</string>
+<key>CFBundleExecutable</key><string>TTS</string>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleLocalizations</key><array><string>en</string><string>ru</string><string>uk</string></array>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>CFBundleIconName</key><string>AppIcon</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>$version</string>
+<key>CFBundleVersion</key><string>$version</string>
+<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+<key>LSMinimumSystemVersion</key><string>$min</string>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSSupportsAutomaticTermination</key><false/>
+<key>SUFeedURL</key><string>https://github.com/geragarazagh/tts/releases/latest/download/appcast.xml</string>
+<key>SUPublicEDKey</key><string>URlTczL/bZGecdDnRO3qHJgOYtOCe5FOPhKetm3FNqY=</string>
+<key>SURequireSignedFeed</key><true/>
+<key>SUVerifyUpdateBeforeExtraction</key><true/>
+<key>SUEnableAutomaticChecks</key><true/>
+<key>SUAllowsAutomaticUpdates</key><false/>
+<key>CFBundleDocumentTypes</key><array><dict>
+  <key>CFBundleTypeName</key><string>Text</string>
+  <key>CFBundleTypeRole</key><string>Viewer</string>
+  <key>LSHandlerRank</key><string>Alternate</string>
+  <key>LSItemContentTypes</key><array><string>public.plain-text</string><string>public.rtf</string><string>com.apple.rtfd</string>
+    <string>public.html</string><string>com.adobe.pdf</string><string>com.apple.webarchive</string><string>net.daringfireball.markdown</string>
+    <string>org.openxmlformats.wordprocessingml.document</string><string>com.microsoft.word.doc</string><string>org.oasis-open.opendocument.text</string></array>
+</dict></array>
+</dict></plist>
+PLIST
+
+for l in ru uk; do
+  mkdir "$app/Contents/Resources/$l.lproj"; cp lang/$l.strings "$app/Contents/Resources/$l.lproj/Localizable.strings"
+done
+mkdir "$app/Contents/Resources/en.lproj"   # English is the text in the code
+
+cat > $tmp/e.plist <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+$([ "${SIGN_ID:--}" = - ] && echo '<key>com.apple.security.cs.disable-library-validation</key><true/>')
+</dict></plist>
+PLIST
+sign=${SIGN_ID:--}; stamp=(); [ "$sign" = - ] || stamp=(--timestamp)
+for l in "$app/Contents/Frameworks/libonnxruntime.$ort.dylib" "$app/Contents/Frameworks/libmp3lame.0.dylib"; do
+  codesign -f -s "$sign" $stamp --options runtime "$l"
+done
+for p in "$sp/Versions/B/Autoupdate" "$sp/Versions/B/Updater.app" "$sp"; do codesign -f -s "$sign" $stamp --options runtime "$p"; done
+codesign -f -s "$sign" $stamp --options runtime --entitlements $tmp/e.plist --identifier $id "$app"
+echo Done
