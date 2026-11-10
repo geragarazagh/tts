@@ -1,4 +1,4 @@
-// The window. Top: voice menu with a ▶ sample, then the speed. Middle: the text. Bottom: the player, or the model
+// The window. Top: the voice (a list to choose and to listen, voices.swift), then the speed. Middle: the text. Bottom: the player, or the model
 // download while there is no model yet.
 //
 // Keys: Space plays and pauses, ← and → jump 15 seconds, whenever the text has no cursor. With the cursor in the text
@@ -65,7 +65,7 @@ final class TextView: NSTextView {
     }
 }
 
-final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
+final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopoverDelegate {
     let root = RootView()
     // TextKit 1 on purpose: the highlight of the sentence being read is a temporary attribute (it never touches the
     // text, its undo or what is copied), and following it needs the sentence's exact place, which TextKit 1 lays out
@@ -73,7 +73,12 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
     let textView = TextView(usingTextLayoutManager: false)
     let scroll = NSScrollView()
 
-    private let voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let voicePopup = VoiceButton(frame: .zero, pullsDown: false)
+    private let voicePopover = NSPopover()
+    private let voiceList = VoiceList()
+    private var voice = 0
+    private var listening: Int?     // the voice whose sample plays
+    private var resumePiece = 0     // where Play goes on after a new voice was chosen while paused
     private let speedSlider = NSSlider(value: Speed.standard, minValue: Speed.min, maxValue: Speed.max, target: nil, action: nil)
     private let speedValue = NSTextField(labelWithString: "")
     private let speedLabel = NSTextField(labelWithString: L("Speed"))
@@ -186,9 +191,13 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
         // Top bar, plain AppKit controls in the family's grammar (STT, #HEX, OCR: 13 pt labels, regular controls,
         // 20 pt margins), not an NSToolbar: on macOS 26+ a toolbar wraps every item in a Liquid Glass capsule, and the
         // speed slider looked like a foreign object in one (the author's remark, 2026-11-09).
-        voicePopup.target = self; voicePopup.action = #selector(voiceChanged)
+        voicePopup.onPress = { [weak self] in self?.showVoices() }
         voicePopup.refusesFirstResponder = true
-        fillVoiceMenu()
+        voicePopover.behavior = .transient
+        voicePopover.contentViewController = voiceList
+        voicePopover.delegate = self
+        voiceList.onChoose = { [weak self] in self?.choose($0) }
+        voiceList.onListen = { [weak self] in self?.listen($0) }
 
         speedSlider.target = self; speedSlider.action = #selector(speedChanged)
         speedSlider.isContinuous = true
@@ -325,7 +334,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
         ])
 
         player.onChange = { [weak self] in self?.refreshPlayer() }
-        samplePlayer.onEnd = { [weak self] in self?.samplePlayer.load(nil) }
+        samplePlayer.onEnd = { [weak self] in self?.samplePlayer.load(nil); self?.listening = nil; self?.refreshVoices() }
     }
 
     private func symbol(_ name: String, _ label: String, size: CGFloat = 13) -> NSImage? {
@@ -333,31 +342,12 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
             .withSymbolConfiguration(.init(pointSize: size, weight: .regular))
     }
 
-    private func fillVoiceMenu() {
-        let menu = NSMenu()
-        func header(_ t: String) -> NSMenuItem {
-            if #available(macOS 14, *) { return NSMenuItem.sectionHeader(title: t) }
-            let i = NSMenuItem(title: t, action: nil, keyEquivalent: "")
-            i.isEnabled = false
-            return i
-        }
-        func tagged(_ i: NSMenuItem) -> NSMenuItem { i.tag = -1; return i }   // headers never match a voice
-        menu.addItem(tagged(header(L("Male"))))
-        for i in 0..<10 {
-            if i == 5 { menu.addItem(.separator()); menu.addItem(tagged(header(L("Female")))) }
-            let it = NSMenuItem(title: String(format: L("Voice %d"), i + 1), action: nil, keyEquivalent: "")
-            it.tag = i
-            menu.addItem(it)
-        }
-        menu.autoenablesItems = false
-        voicePopup.menu = menu
-    }
-
     // MARK: settings
 
     private func restoreSettings() {
         let v = UserDefaults.standard.integer(forKey: "voice")
-        voicePopup.selectItem(withTag: (0..<10).contains(v) ? v : 0)
+        voice = (0..<10).contains(v) ? v : 0
+        voicePopup.show(String(format: L("Voice %d"), voice + 1))
         let stored = UserDefaults.standard.object(forKey: "speed") as? Double ?? Speed.standard
         let s = Speed.round(min(Speed.max, max(Speed.min, stored)))
         speedSlider.doubleValue = s
@@ -383,7 +373,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
     @objc func smallerText(_ s: Any?) { if let n = Self.sizes.last(where: { $0 < textSize }) { setTextSize(n) } }
     @objc func actualSizeText(_ s: Any?) { setTextSize(NSFont.systemFontSize) }
 
-    private var voiceIndex: Int { voicePopup.selectedItem?.tag ?? 0 }
+    private var voiceIndex: Int { voice }
     private var speed: Float { Float(Speed.round(speedSlider.doubleValue)) }
 
     // MARK: model
@@ -538,7 +528,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
     // MARK: playing
 
     func togglePlay() {
-        stopSample()
+        stopListening()
         if player.source != nil, generatorText == textView.string, generatorVoice == voiceIndex {
             player.toggle(); return
         }
@@ -547,7 +537,8 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
             if loading { playWhenLoaded = true }
             return
         }
-        startGenerating(engine: engine, voice: voice, fromPiece: 0, play: true)
+        startGenerating(engine: engine, voice: voice, fromPiece: resumePiece, play: true)
+        resumePiece = 0
     }
 
     private func startGenerating(engine: Supertonic, voice: Voice, fromPiece: Int, play: Bool) {
@@ -595,7 +586,8 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
         player.pause()
         player.load(nil)
         sentences = []
-        stopSample()
+        resumePiece = 0
+        stopListening()
         refreshControls()
     }
 
@@ -608,26 +600,34 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
         player.skip(seconds: s)
     }
 
-    /// The voice is its own sample (the author's design, 2026-11-09): choosing a voice plays it, choosing the same voice again
-    /// plays it again (NSPopUpButton sends its action for the chosen item even when it was already chosen). While the
-    /// text is being read, a new voice goes on reading from the same place instead: that is hearing it too.
-    @objc private func voiceChanged() {
-        let changed = voiceIndex != UserDefaults.standard.integer(forKey: "voice")
-        UserDefaults.standard.set(voiceIndex, forKey: "voice")
-        if let g = generator, player.isPlaying, let engine, let voice = voices[Voices.ids[voiceIndex]] {
-            guard changed else { return }
-            stopSample()
+    /// A click on a voice's name chooses it, silently (the author's design, 2026-11-10; listening is the waveform
+    /// button). While the text is being read, the new voice goes on reading from the same place. Paused, the sound
+    /// made in the old voice goes but the place stays: Play goes on from it in the new voice.
+    private func choose(_ i: Int) {
+        guard i != voice else { return }
+        voice = i
+        UserDefaults.standard.set(i, forKey: "voice")
+        voicePopup.show(String(format: L("Voice %d"), i + 1))
+        refreshVoices()
+        if let g = generator, player.isPlaying, let engine, let v = voices[Voices.ids[i]] {
             let piece = g.store.piece(at: player.position)
             g.cancel()
             generator = nil
             player.pause()
             player.load(nil)
-            startGenerating(engine: engine, voice: voice, fromPiece: piece, play: true)
+            startGenerating(engine: engine, voice: v, fromPiece: piece, play: true)
             return
         }
-        // Paused or stopped: the made sound belongs to the old voice and goes; the sample plays.
-        if changed && player.source != nil { stopAll() }
-        sample()
+        guard generator != nil || player.source != nil else { return }
+        if let g = generator { resumePiece = g.store.piece(at: player.position) }
+        generator?.cancel()
+        generator = nil
+        generatorText = ""
+        generatorVoice = -1
+        player.pause()
+        player.load(nil)
+        sentences = []
+        refreshControls()
     }
 
     @objc private func speedChanged() {
@@ -635,62 +635,43 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
         speedSlider.doubleValue = s
         speedValue.stringValue = Speed.text(s)
         player.speed = Float(s)
+        samplePlayer.speed = Float(s)
         UserDefaults.standard.set(s, forKey: "speed")
         refreshPlayer()
     }
 
-    // MARK: sample
+    // MARK: listening
 
-    private func stopSample() {
-        sampleToken = UUID()
-        sampleBusy = false
-        if samplePlayer.source != nil { samplePlayer.pause(); samplePlayer.load(nil) }
+    private func showVoices() {
+        if voicePopover.isShown { voicePopover.performClose(nil); return }
+        _ = voiceList.view
+        refreshVoices()
+        voicePopover.show(relativeTo: voicePopup.bounds, of: voicePopup, preferredEdge: .maxY)
     }
 
-    private func sample() {
-        stopSample()
-        guard let engine, let voice = voices[Voices.ids[voiceIndex]] else { return }
-        if player.isPlaying { player.pause() }
-        let (t, lang) = sampleText()
+    func popoverDidClose(_ n: Notification) { stopListening() }
+
+    /// A voice's ready sample, at once; the same button again stops it. Reading the text pauses meanwhile.
+    private func listen(_ i: Int) {
+        if listening == i { stopListening(); return }
+        stopListening()
         let sp = speed
-        sampleBusy = true
-        let token = UUID()
-        sampleToken = token
-        sampleWork.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let r = Result { try engine.synthesize(t, lang: lang, voice: voice, steps: flowSteps, speed: Speed.engine(sp)) }
-            self.sampleWork.leave()
-            DispatchQueue.main.async {
-                guard self.sampleToken == token, self.sampleBusy else { return }
-                self.sampleBusy = false
-                switch r {
-                case .success(let w):
-                    self.samplePlayer.speed = sp
-                    self.samplePlayer.load(MemorySource(w, sampleRate: engine.sampleRate, speed: Speed.engine(sp)))
-                    self.samplePlayer.play()
-                case .failure(let e): self.report(L("Speech could not be made"), "\(e)")
-                }
-            }
-        }
+        guard let src = Clips.load(voice: Voices.ids[i], lang: Clips.language(for: text), speed: Clips.speed(for: sp)) else { return }
+        if player.isPlaying { player.pause() }
+        samplePlayer.speed = sp
+        samplePlayer.load(src)
+        samplePlayer.play()
+        listening = i
+        refreshVoices()
     }
 
-    private var sampleBusy = false
-    private let sampleWork = DispatchGroup()
-    private var sampleToken = UUID()
-
-    /// The first sentence of the text, or a passage of classic literature in the app's language.
-    private func sampleText() -> (String, String) {
-        let t = text
-        if !t.isEmpty {
-            let pieces = Pieces.make(t, fallback: appLanguage)
-            if let p = pieces.first {
-                let first = Pieces.split(p.text, lang: p.lang).first ?? p.text
-                return (Pieces.cut(first, max: 200).first ?? first, p.lang)
-            }
-        }
-        let lang = Samples.texts[appLanguage] != nil ? appLanguage : "en"
-        return (Samples.texts[lang]!.randomElement()!, lang)
+    private func stopListening() {
+        if samplePlayer.source != nil { samplePlayer.pause(); samplePlayer.load(nil) }
+        listening = nil
+        refreshVoices()
     }
+
+    private func refreshVoices() { if voiceList.isViewLoaded { voiceList.show(chosen: voice, playing: listening) } }
 
     // MARK: save
 
@@ -755,7 +736,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
     private func refreshControls() {
         let ready = engine != nil
         let hasText = !text.isEmpty
-        voicePopup.isEnabled = Model.isHere
+        voicePopup.isEnabled = true     // the samples need no model
         speedSlider.isEnabled = true
         playButton.isEnabled = (ready || loading) && (hasText || player.source != nil)
         saveButton.isEnabled = ready && hasText && saving == nil
@@ -887,7 +868,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate {
         samplePlayer.shutDown()
         generator?.cancel(); saving?.generator?.cancel()
         let stopped = (generator?.wait(seconds: 3) ?? true) && (saving?.generator?.wait(seconds: 3) ?? true)
-            && sampleWork.wait(timeout: .now() + 3) == .success && !loading
+            && !loading
         if stopped { releaseEngine() } else { _exit(0) }
     }
 

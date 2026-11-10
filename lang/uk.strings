@@ -64,3 +64,5 @@
 "This file could not be read" = "Не вдалося прочитати цей файл";
 "Speech could not be made" = "Не вдалося створити мовлення";
 "The MP3 could not be saved" = "Не вдалося зберегти MP3";
+"Listen" = "Послухати";
+"Stop" = "Зупинити";

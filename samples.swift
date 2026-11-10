@@ -1,4 +1,5 @@
-// Passages the ▶ next to the voice reads when there is no text yet: two per language, one at random. Public domain
+// Passages of the ready voice samples (voices.swift, Clips; Resources/Samples is made from `clip` below by bench/clips):
+// every voice reads the same one per language, so voices compare on equal words. Public domain
 // everywhere except Bulgakov, below (checked 2026-11-09 against these editions; wording as printed, ё added where the printed
 // «е» is a homograph for a voice, typographic apostrophes):
 // ru  Ильф и Петров, «Двенадцать стульев», гл. VI (ru.wikisource, ГИХЛ 1961 = ЗиФ 1928 here word for word);
@@ -12,6 +13,8 @@
 // Lines of verse are joined by line breaks; the voice reads them as one passage.
 
 enum Samples {
+    /// Which passage of each language the bundled clips read: Воланд, Еней, the seven ages (2026-11-10).
+    static let clip = ["ru": 1, "uk": 0, "en": 0]
     static let texts: [String: [String]] = [
         "ru": [
             "В продолжение рассказа Остап несколько раз вскакивал и, обращаясь к железной печке, восторженно вскрикивал:\n— Лёд тронулся, господа присяжные заседатели! Лёд тронулся.",

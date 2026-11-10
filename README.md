@@ -22,7 +22,7 @@ On first launch the window offers the voice model, 401 MB. Nothing is downloaded
 
 A text is pasted or dropped as a file: plain text, Markdown, RTF, Word, OpenDocument, HTML, PDF. Markdown loses its syntax, the words stay.
 
-Voices 1 to 5 are male, 6 to 10 female, in the order of the model’s developer. Choosing a voice plays it: the first sentence of the text, or a passage of classic literature when there is no text. During reading a new voice goes on from the same place.
+Voices 1 to 5 are male, 6 to 10 female, in the order of the model’s developer. The voice button at the top opens the list: a click on a name chooses that voice, the waveform button next to it plays a short sample, and a second press stops it. The samples come with the app, so they sound at once, even before the model is downloaded. During reading a new voice goes on from the same place.
 
 Speed goes from 0.70 to 2.00, 1.05 by default, and changes while listening. Save MP3 writes the whole text at the chosen voice and speed.
 
@@ -41,6 +41,7 @@ Speech is made on the Mac by Supertonic 3 (Supertone), an open model, through ON
 - The length of every piece comes from the duration model before any sound is made, so the total time shows at once and several pieces are made in parallel at their own places.
 - Highlight: a piece of several sentences shares its length among them as the duration model measures each one. Checked against Whisper’s word times, it moves to the next sentence after the last word of the one before and before the end of its own first word.
 - Speed: the model itself speaks only between 0.95 and 1.25, where it keeps every word; beyond that, Apple’s `AVAudioUnitTimePitch` stretches its sound with the pitch kept, the same way while listening and in the saved MP3.
+- Voice samples: 60 short clips inside the app, 3.4 MB of AAC, made by the same model: every voice reads the same passage, in Russian from Bulgakov’s “The Master and Margarita”, in Ukrainian from Kotliarevsky’s “Eneida”, in English Shakespeare’s seven ages of man, at the model’s speeds 1.05 and 1.25. Below 1.25 the 1.05 clip plays, from 1.25 the 1.25 one, stretched to the chosen speed. The language is the text’s when it is Russian, Ukrainian or English, else the interface’s. A clip starts within a tenth of a second; making the sample anew took 2.3 to 2.5 seconds.
 - Flow-matching steps are fixed at 8, the model’s default: from 6 on, quality no longer grows, while time grows with every step.
 - While listening, the sound lives as 16-bit samples in a temporary file that has no name on disk (deleted the moment it is opened), so nothing is left behind.
 - MP3: LAME 4.0 (LGPL), mono, 44.1 kHz, VBR quality 2, about 45 MB an hour, with the LAME tag so players show the exact length. Its comment says the speech is synthetic, as the model’s licence asks of published output.
@@ -112,15 +113,15 @@ Installed with Homebrew, `brew uninstall --zap tts` quits it and removes the app
 
 ### Details
 
-- Version: 0.1.
+- Version: 0.2.
 - Bundle ID: `com.geragaraza.tts`.
-- Download: `TTS.dmg`, 8.0 MB.
+- Download: `TTS.dmg`, 11.3 MB.
 - Model: downloaded separately, 401 MB.
 - Requires: Apple silicon, macOS 13.3 or later (ONNX Runtime’s library for macOS needs 13.3).
 - Permissions: none. Network: to download the model and to check for updates.
 - Signed with a Developer ID and notarized by Apple.
 - Interface: English, Ukrainian, Russian, from the language of macOS.
-- Code: Swift with AppKit, about 2,200 lines, ONNX Runtime, LAME, and Sparkle for updates.
+- Code: Swift with AppKit, about 2,300 lines, ONNX Runtime, LAME, and Sparkle for updates.
 - License: MIT; the model OpenRAIL-M.
 
 ### Build

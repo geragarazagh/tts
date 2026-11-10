@@ -5,7 +5,7 @@ cd "${0:A:h}"
 # It changes per release, not per build.
 # min 13.3: ONNX Runtime 1.22 is the newest release whose macOS library loads on 13 (13.3, the first 13 with
 # std::to_chars for floats); 1.23 asks for 13.4, 1.24 and newer for 14 (measured with otool, 2026-11-09).
-version=0.1 min=13.3 id=com.geragaraza.tts app=TTS.app ort=1.22.0
+version=0.2 min=13.3 id=com.geragaraza.tts app=TTS.app ort=1.22.0
 tmp=$(mktemp -d); trap 'rm -rf $tmp' EXIT
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
@@ -42,7 +42,7 @@ swiftc -O -target arm64-apple-macos$min -module-name TTS -parse-as-library \
   -I vendor/onnxruntime/include -L vendor/onnxruntime/lib -I vendor/lame/include -L vendor/lame/lib -F vendor -framework Sparkle \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   -o "$app/Contents/MacOS/TTS" app.swift common.swift window.swift engine.swift speech.swift player.swift model.swift download.swift \
-  text.swift mp3.swift stretch.swift samples.swift updates.swift 2>&1 | grep -E "error" || true
+  text.swift mp3.swift stretch.swift samples.swift updates.swift voices.swift 2>&1 | grep -E "error" || true
 [ -x "$app/Contents/MacOS/TTS" ]
 
 # Icon, as STT: icon.swift draws the picture, Icon Composer's format, actool compiles it (see STT's build for why
@@ -69,6 +69,8 @@ for r in Default Dark; do
   sips -p 256 256 $tmp/$r.png --out docs/icon${${r:#Default}:+-dark}.png >/dev/null
 done
 cp LICENSE THIRD-PARTY-LICENSES.md "$app/Contents/Resources/" 2>/dev/null || true
+# The ready voice samples (voices.swift, Clips), made by bench/clips.
+ditto Samples "$app/Contents/Resources/Samples"
 
 # Text files of every kind open in TTS from Finder's Open With and by dropping on the Dock icon. Alternate: never the
 # default app for a type someone else owns.

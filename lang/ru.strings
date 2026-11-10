@@ -64,3 +64,5 @@
 "This file could not be read" = "Этот файл не удалось прочитать";
 "Speech could not be made" = "Речь не удалось создать";
 "The MP3 could not be saved" = "MP3 не удалось сохранить";
+"Listen" = "Послушать";
+"Stop" = "Остановить";
