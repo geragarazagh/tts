@@ -40,7 +40,7 @@ TTS speaks with Apple’s own voices. Siri’s are the clearest voices on a Mac:
 
 - Voices: macOS lists Siri’s voices only to programs Apple signed. The app has `osascript`, a part of every Mac, run its script `tts` (JavaScript for Automation), which speaks with AVSpeechSynthesizer and so gets every voice the Mac has. Siri’s voices checked this way on macOS 27; the app itself on 13, 14 and 26 with the voices those Macs had. Apple does not document this way; if an update closes it, the app speaks with the other voices of macOS.
 - Text step for Russian and Ukrainian: numbers become words in the case the sentence needs (preposition before, noun after: с 18 ГБ, до 12:00, з 08:00), with dates, times, years, Roman centuries, decimals, fractions, ranges, currencies, percent, degrees and units; abbreviations are expanded, “ИИ” in its case too. Markdown marks, emoji and links (read as their site) go. A Russian test text with 35 numbers was read right in full, a Ukrainian one with 16 too; without this step Siri read 31 of the 35.
-- Each paragraph gets its language: Ukrainian and Russian by their letters and common words, the others by Apple’s language recognizer; a Russian paragraph with English words stays in one voice. For a language without a chosen voice the best voice of the same kind is taken.
+- Each paragraph gets its language: Ukrainian and Russian by their letters and common words, the others by Apple’s language recognizer; a Russian paragraph with English words stays in one voice, and a line in Latin letters whose language the recognizer is unsure of (names, models, numbers) is read in English. For a language without a chosen voice the best voice of the same kind is taken, and of several Siri voices the one with the lowest number.
 - Sentences are spoken one by one by two helper processes (all performance cores when saving), each into a file that grows while the voice speaks, so a sentence plays while it is still being made and the highlight is exact. Pauses are Siri’s own: 0.32 s between sentences at 1×, shorter at higher speed, twice that between paragraphs.
 - Voice samples are spoken on the Mac when the button is pressed: the app carries no recordings of Apple’s voices. In Russian the voices read Woland from Bulgakov’s “The Master and Margarita”, in Ukrainian the start of Kotliarevsky’s “Eneida”, in English Shakespeare’s seven ages of man; in other languages the start of the text.
 - While listening, the sound lives as 16-bit samples in a temporary file that has no name on disk (deleted the moment it is opened), so nothing is left behind.
@@ -95,7 +95,7 @@ Installed with Homebrew, `brew uninstall --zap tts` quits it and removes the app
 
 ### Details
 
-- Version: 0.3.
+- Version: 0.4.
 - Bundle ID: `com.geragaraza.tts`.
 - Download: `TTS.dmg`, 1.7 MB.
 - Requires: Apple silicon, macOS 13 or later.

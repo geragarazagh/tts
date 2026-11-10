@@ -96,8 +96,13 @@ function voices() {
     // open (measured 2026-11-10 in the TTS app's test machine); such a voice would read nothing
     if (v.score > 0 && !$.AVSpeechSynthesisVoice.voiceWithIdentifier(v.id).isNil()) r.push(v);
   }
+  // Last, Apple's own number of a Siri voice («Voice 2»), lowest first. Without it a Mac with more Siri voices
+  // downloaded got whichever macOS listed first (2026-11-10: en female turned from Voice 4 to Voice 6 when all seven
+  // en-US voices were downloaded). The lowest number is also the clearest where measured: en-US Voice 2 Simone and
+  // Voice 1 Aaron read clean by Whisper up to 3x, the others not (dev/tts.md, «Site block»).
+  var num = function (v) { var m = v.score >= 400 && /(\d+)\s*$/.exec(v.name); return m ? Number(m[1]) : 99; };
   r.sort(function (a, b) {
-    return b.score - a.score || (b.lang.split('-')[1] == HOME[b.code]) - (a.lang.split('-')[1] == HOME[a.code]) || (b.gender == 2) - (a.gender == 2);
+    return b.score - a.score || (b.lang.split('-')[1] == HOME[b.code]) - (a.lang.split('-')[1] == HOME[a.code]) || (b.gender == 2) - (a.gender == 2) || num(a) - num(b);
   });
   return (VOICES = r);
 }
@@ -153,10 +158,18 @@ function detect(par) {
   }
   // a short Latin line inside a Russian text (a name, a title) keeps the voice it is among
   if (lat >= letters * 0.8 && (par.match(/\p{L}+/gu) || []).length < 4) return null;
+  // A real sentence in any language comes back at 0.99 or more; lines of names, brands and numbers
+  // («iPhone 15 Pro Max 256 GB», video stats) at 0.2-0.75 and often as the wrong language (Indonesian,
+  // Turkish, Dutch). Such a line in Latin letters is read best by the English voice (measured 2026-11-10).
+  // Only Latin: short lines of other scripts score low too («你好» zh-Hant 0.80, «مرحبا بالعالم» ar 0.86)
+  // and are right.
   var rec = $.NLLanguageRecognizer.alloc.init;
   rec.processString(par);
-  var d = rec.dominantLanguage;
-  return d.isNil() ? null : d.js;
+  var h = ObjC.deepUnwrap(rec.languageHypothesesWithMaximum(1)) || {};
+  var top = Object.keys(h)[0];
+  if (!top) return null;
+  var latin = (par.match(/\p{Script=Latin}/gu) || []).length;
+  return h[top] < 0.9 && latin >= letters * 0.8 ? 'en' : top;
 }
 
 // ---------------------------------------------------------------- numbers to words (ru, uk)
