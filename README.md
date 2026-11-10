@@ -2,9 +2,9 @@
 
 # TTS (Text to Speech) for Mac
 
-Free, open source text to speech app for macOS. A text pasted into the window or a file dropped on it is read aloud in one of ten voices, and the speech can be saved as an MP3.
+Free, open source text to speech app for macOS. A text pasted into the window or a file dropped on it is read aloud with the voices of macOS, Siri’s included, and the speech can be saved as an MP3.
 
-Apple silicon, macOS 13.3 or later. Interface in English, Ukrainian and Russian. Signed with a Developer ID and notarized by Apple.
+Apple silicon, macOS 13 or later. Interface in English, Ukrainian and Russian. Signed with a Developer ID and notarized by Apple.
 
 ## Install
 
@@ -18,13 +18,13 @@ brew install geragarazagh/tap/tts
 
 ## Use
 
-On first launch the window offers the voice model, 401 MB. Nothing is downloaded before Download is pressed.
-
 A text is pasted or dropped as a file: plain text, Markdown, RTF, Word, OpenDocument, HTML, PDF. Markdown loses its syntax, the words stay.
 
-Voices 1 to 5 are male, 6 to 10 female, in the order of the model’s developer. The voice button at the top opens the list: a click on a name chooses that voice, the waveform button next to it plays a short sample, and a second press stops it. The samples come with the app, so they sound at once, even before the model is downloaded. During reading a new voice goes on from the same place.
+The voice button at the top opens the voices of the language the text is in, named as System Settings names them: Siri’s “Voice 1”, “Voice 2” and so on where Siri speaks the language, otherwise the best voice macOS has (Ukrainian: Lesya). A click on a name chooses the voice; the waveform button next to it plays a short sample, spoken on the spot by that voice at the chosen speed, and a second press stops it. During reading a new voice goes on from the start of the same sentence.
 
-Speed goes from 0.70 to 2.00, 1.05 by default, and changes while listening. Save MP3 writes the whole text at the chosen voice and speed.
+Siri’s voices are a free download in System Settings. When the language has Siri voices but none is downloaded, the list starts with Download Siri Voices…, which opens the right page of System Settings and names the steps left there; coming back to the app, the list shows the new voice.
+
+Speed goes from 0.6× to 3.5×, 1.0× being the normal rate of the Mac. The voice itself speaks faster or slower, the sound is never stretched: a new speed is heard at once, from the start of the sentence being read. Save MP3 writes the whole text in the chosen voice and speed, with the same pauses.
 
 The sentence being read is highlighted, and the text scrolls to keep it in view. Command-Plus and Command-Minus change the text size.
 
@@ -32,70 +32,50 @@ Space plays and pauses, the Left and Right arrows jump 15 seconds, when the curs
 
 ## For advanced users and language models
 
-Speech is made on the Mac by Supertonic 3 (Supertone), an open model, through ONNX Runtime. The network is used only to download the model and to check for updates. No history, no logs, no account; the text is not kept.
+TTS speaks with Apple’s own voices. Siri’s are the clearest voices on a Mac: plainly synthetic, never mumbling. Speech starts in about half a second and is made on the Mac itself, so the app works without internet and suits confidential text: nothing is sent anywhere. Checked while Siri spoke a long text: Apple’s speech processes opened no network connection. The only network use of the app is its daily check for updates.
 
 ### How it works
 
-- Engine: Supertonic 3, four ONNX models (duration, text encoder, flow matching, vocoder), 44.1 kHz mono, run on the CPU by ONNX Runtime 1.22 (MIT) through its C API. A port of the developer’s Python package with the same text cleaning; its output matches the package’s sample by sample within 0.0001.
-- The text is split into paragraphs and sentences (Apple’s NaturalLanguage) and pieces of up to 300 characters; the first piece is one short sentence, so the sound starts at once. Each paragraph gets its language: Ukrainian and Russian by their own letters, the others by Apple’s language recognizer limited to the model’s 31 languages.
-- The length of every piece comes from the duration model before any sound is made, so the total time shows at once and several pieces are made in parallel at their own places.
-- Highlight: a piece of several sentences shares its length among them as the duration model measures each one. Checked against Whisper’s word times, it moves to the next sentence after the last word of the one before and before the end of its own first word.
-- Speed: the model itself speaks only between 0.95 and 1.25, where it keeps every word; beyond that, Apple’s `AVAudioUnitTimePitch` stretches its sound with the pitch kept, the same way while listening and in the saved MP3.
-- Voice samples: 60 short clips inside the app, 3.4 MB of AAC, made by the same model: every voice reads the same passage, in Russian from Bulgakov’s “The Master and Margarita”, in Ukrainian from Kotliarevsky’s “Eneida”, in English Shakespeare’s seven ages of man, at the model’s speeds 1.05 and 1.25. Below 1.25 the 1.05 clip plays, from 1.25 the 1.25 one, stretched to the chosen speed. The language is the text’s when it is Russian, Ukrainian or English, else the interface’s. A clip starts within a tenth of a second; making the sample anew took 2.3 to 2.5 seconds.
-- Flow-matching steps are fixed at 8, the model’s default: from 6 on, quality no longer grows, while time grows with every step.
+- Voices: macOS lists Siri’s voices only to programs Apple signed. The app has `osascript`, a part of every Mac, run its script `tts` (JavaScript for Automation), which speaks with AVSpeechSynthesizer and so gets every voice the Mac has. Siri’s voices checked this way on macOS 27; the app itself on 13, 14 and 26 with the voices those Macs had. Apple does not document this way; if an update closes it, the app speaks with the other voices of macOS.
+- Text step for Russian and Ukrainian: numbers become words in the case the sentence needs (preposition before, noun after: с 18 ГБ, до 12:00, з 08:00), with dates, times, years, Roman centuries, decimals, fractions, ranges, currencies, percent, degrees and units; abbreviations are expanded, “ИИ” in its case too. Markdown marks, emoji and links (read as their site) go. A Russian test text with 35 numbers was read right in full, a Ukrainian one with 16 too; without this step Siri read 31 of the 35.
+- Each paragraph gets its language: Ukrainian and Russian by their letters and common words, the others by Apple’s language recognizer; a Russian paragraph with English words stays in one voice. For a language without a chosen voice the best voice of the same kind is taken.
+- Sentences are spoken one by one by two helper processes (all performance cores when saving), each into a file that grows while the voice speaks, so a sentence plays while it is still being made and the highlight is exact. Pauses are Siri’s own: 0.32 s between sentences at 1×, shorter at higher speed, twice that between paragraphs.
+- Voice samples are spoken on the Mac when the button is pressed: the app carries no recordings of Apple’s voices. In Russian the voices read Woland from Bulgakov’s “The Master and Margarita”, in Ukrainian the start of Kotliarevsky’s “Eneida”, in English Shakespeare’s seven ages of man; in other languages the start of the text.
 - While listening, the sound lives as 16-bit samples in a temporary file that has no name on disk (deleted the moment it is opened), so nothing is left behind.
-- MP3: LAME 4.0 (LGPL), mono, 44.1 kHz, VBR quality 2, about 45 MB an hour, with the LAME tag so players show the exact length. Its comment says the speech is synthetic, as the model’s licence asks of published output.
+- MP3: LAME 4.0 (LGPL), mono, 48 kHz, VBR quality 2, about 48 MB an hour, with the LAME tag so players show the exact length; its comment says the speech is synthetic.
+- The script is also a command line tool: `/Applications/TTS.app/Contents/Resources/tts -h` (a text file to MP3, M4A, WAV or AIFF, voice, speed, `-t` prints the text as it will be read, `-L` lists the voices).
 
-### Model
-
-No model comes with the app: 401 MB are downloaded after Download is pressed, from Supertone’s own Hugging Face repository at a fixed revision, each of the 17 files checked against its SHA-256. A copy of the same files is kept in this repository’s release `model-3`, used when a file fails from Hugging Face. The files sit in `~/Library/Application Support/TTS/Supertonic 3`; the app menu has Show Model in Finder and Delete Model.
-
-Licence of the model: OpenRAIL-M. Free use and redistribution, with use restrictions passed on to every user: no unlawful use, no harm to minors, no disinformation meant to harm, no impersonation of people without their consent, and the rest of its Attachment A.
-
-31 languages: English, Korean, Japanese, Arabic, Bulgarian, Czech, Danish, German, Greek, Spanish, Estonian, Finnish, French, Hindi, Croatian, Hungarian, Indonesian, Italian, Lithuanian, Latvian, Dutch, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Swedish, Turkish, Ukrainian, Vietnamese.
+Apple’s voices are part of macOS, and its licence allows the speech they make for personal, non-commercial use.
 
 ### Measured
 
-Word error rate of the speech read back by Whisper large-v3: 12 sentences each in Russian, Ukrainian and English from the public FLEURS set, voices 1 and 6, on a MacBook Pro with M3 Pro (2026-11-09). Model alone = its own speed setting; the app’s way = the model inside 0.95–1.25 and Apple’s stretch beyond.
-
-| Speed | Model alone | The app’s way |
-|---|---|---|
-| 0.70 | 20.9 % | 1.4 % |
-| 0.85 | 3.2 % | 1.2 % |
-| 1.05 | 1.2 % | 1.2 % |
-| 1.25 | 1.6 % | 1.6 % |
-| 1.50 | 4.5 % | 1.7 % |
-| 2.00 | 55.0 % | 1.5 % |
-
-At 0.70 and 0.85 the stretch in that test started from 1.05; the app stretches from 0.95. A second check through the app itself (2026-11-10: Russian, Ukrainian and English passages of 88 to 153 words, voices 1 and 6, speeds 0.70, 0.95, 1.05, 1.25, 2.00) lost 0 or 1 word per passage at every speed.
-
-Making speech, 8 steps: about 178 characters a second on the M3 Pro, some 13 times faster than it is spoken; the first sound after 0.6 to 2 s. A virtual Mac with 4 cores of the same chip and no Neural Engine: 6.6 times faster than spoken.
+On a MacBook Pro with M3 Pro, macOS 27.2 (2026-11-10): the first sound 0.55 s after Play; a new speed heard 0.15 to 0.35 s after the slider stops; a voice sample 0.14 to 0.2 s after the press. The test texts, 955 characters of Russian with 35 numbers and 555 of Ukrainian with 16, read back by Whisper large-v3: every number right with Siri Voice 1 and Voice 2 and with Lesya. The command line tool read 100,163 characters of Chekhov into 1 h 41 min of speech in 5 min 36 s.
 
 ### Questions
 
 #### Does my text leave the Mac?
 
-No. The code goes online only to download the model and to check for updates.
+No. The voices speak on the Mac itself; the app goes online only to check for updates.
 
 #### Does it work without internet?
 
-Yes, once the model is downloaded.
+Yes. Only downloading a Siri voice in System Settings needs it, once.
 
 #### Which voices are there?
 
-The ten voices of Supertonic 3, numbered in the order its developer gives them: 1 to 5 male, 6 to 10 female. Voices can’t be added or cloned.
+The voices of macOS: Siri’s in the languages Siri speaks, among them Russian (Voice 1 and Voice 2), English, German, French, Spanish, Italian, Portuguese, Dutch, Turkish, Arabic, Japanese, Korean and Chinese, and Apple’s other voices for some forty languages, Ukrainian (Lesya) among them. Voices can’t be added or cloned in the app.
 
-#### Can it use the Siri voices of macOS?
+#### Where do Siri voices come from?
 
-No. macOS gives its Siri voices only to Apple’s own apps; other apps get only the older system voices.
-
-#### Does it read numbers?
-
-The model reads digits itself, and long numbers in Russian and Ukrainian sometimes come out wrong. Numbers written in words are always read right.
+From System Settings, free. Download Siri Voices… in the app’s voice list opens the page: on macOS 26 and later Accessibility, Read & Speak, then the ⓘ next to System voice and the language; on macOS 13 to 15 Accessibility, Spoken Content, System voice, Manage Voices….
 
 #### Can it read the text selected in any app?
 
-No: macOS does that itself, in System Settings, Accessibility, Spoken Content, Speak Selection.
+No: macOS does that itself, in System Settings, Accessibility, Read & Speak (Spoken Content before macOS 26), Speak selection.
+
+#### What happened to the voices of 0.1 and 0.2?
+
+They came from the downloaded Supertonic 3 model, which read numbers and long texts less reliably. Version 0.3 speaks with the voices of macOS and deletes that model, 401 MB, on its first launch.
 
 ### Updates
 
@@ -105,31 +85,30 @@ The feed and the disk image are signed with an EdDSA key, and Sparkle installs o
 
 ### Settings and removal
 
-Settings (voice, speed, text size) and the time of the last update check are in the defaults of `com.geragaraza.tts`, the model in `~/Library/Application Support/TTS`.
+Settings (the voices chosen per language, the speed, the text size) and the time of the last update check are in the defaults of `com.geragaraza.tts`. Nothing else is kept: no text, no history, no saved window state.
 
-To remove TTS: Delete Model in the app menu (or delete that folder), quit, move `TTS.app` to the Trash and run `defaults delete com.geragaraza.tts`.
+To remove TTS: quit it, move `TTS.app` to the Trash and run `defaults delete com.geragaraza.tts`. Siri voices stay in macOS; System Settings removes them.
 
-Installed with Homebrew, `brew uninstall --zap tts` quits it and removes the app, its settings and the model.
+Installed with Homebrew, `brew uninstall --zap tts` quits it and removes the app and its settings.
 
 ### Details
 
-- Version: 0.2.
+- Version: 0.3.
 - Bundle ID: `com.geragaraza.tts`.
-- Download: `TTS.dmg`, 11.3 MB.
-- Model: downloaded separately, 401 MB.
-- Requires: Apple silicon, macOS 13.3 or later (ONNX Runtime’s library for macOS needs 13.3).
-- Permissions: none. Network: to download the model and to check for updates.
+- Download: `TTS.dmg`, 1.7 MB.
+- Requires: Apple silicon, macOS 13 or later.
+- Permissions: none. Network: to check for updates.
 - Signed with a Developer ID and notarized by Apple.
 - Interface: English, Ukrainian, Russian, from the language of macOS.
-- Code: Swift with AppKit, about 2,300 lines, ONNX Runtime, LAME, and Sparkle for updates.
-- License: MIT; the model OpenRAIL-M.
+- Code: Swift with AppKit, about 2,500 lines, the script `tts` in JavaScript for Automation, about 1,300 lines, LAME, and Sparkle for updates.
+- License: MIT.
 
 ### Build
 
-Needs Xcode (the icon is compiled by `actool`). The first build downloads ONNX Runtime and Sparkle from their releases; LAME is a library built from its source, how is in `vendor/lame/lame.txt`.
+Needs Xcode (the icon is compiled by `actool`). The first build downloads Sparkle from its release; LAME is a library built from its source, how is in `vendor/lame/lame.txt`.
 
     ./build
 
-Voices: [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) by Supertone. Engine: [ONNX Runtime](https://onnxruntime.ai). MP3: [LAME](https://lame.sourceforge.io). Updates: [Sparkle](https://sparkle-project.org). Licenses of the parts: [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
+Voices: Apple’s, part of macOS. MP3: [LAME](https://lame.sourceforge.io). Updates: [Sparkle](https://sparkle-project.org). Licenses of the parts: [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
 
-Search terms: text to speech for Mac, TTS Mac, read text aloud, text to MP3, offline text to speech, natural voices, Supertonic, AI voices offline, audiobook from text, speech synthesis macOS, free text reader, Ukrainian and Russian text to speech on Mac.
+Search terms: text to speech for Mac, TTS Mac, Siri voice text to speech, read text aloud, text to MP3, offline text to speech, private text to speech, audiobook from text, speech synthesis macOS, free text reader, Russian and Ukrainian text to speech on Mac, numbers read right.

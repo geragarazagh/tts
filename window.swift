@@ -76,41 +76,36 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
     private let voicePopup = VoiceButton(frame: .zero, pullsDown: false)
     private let voicePopover = NSPopover()
     private let voiceList = VoiceList()
-    private var voice = 0
-    private var listening: Int?     // the voice whose sample plays
-    private var resumePiece = 0     // where Play goes on after a new voice was chosen while paused
     private let speedSlider = NSSlider(value: Speed.standard, minValue: Speed.min, maxValue: Speed.max, target: nil, action: nil)
     private let speedValue = NSTextField(labelWithString: "")
     private let speedLabel = NSTextField(labelWithString: L("Speed"))
     private let topBar = NSView()
 
     private let bar = NSView()
-    private let playerRow = NSView()
     private let backButton = NSButton()
     private let playButton = NSButton()
     private let forwardButton = NSButton()
     private let timeLabel = NSTextField(labelWithString: "")
     private let saveButton = NSButton(title: L("Save MP3…"), target: nil, action: nil)
 
-    private let downloadRow = NSView()
-    private let downloadNote = NSTextField(labelWithString: "")
-    private let downloadButton = NSButton(title: L("Download"), target: nil, action: nil)
-    private let progress = NSProgressIndicator()
-    private let cancelButton = NSButton(title: L("Cancel"), target: nil, action: nil)
-
-    private var engine: Supertonic?
-    private var voices: [String: Voice] = [:]
-    private var loading = false
-    private var playWhenLoaded = false
-    private var download: ModelDownload?
+    // The text step of the text as it is now (made while typing stops, so Play starts at once), the voices chosen per
+    // language, and the speech being heard.
+    private var plan: Plan?
+    private var planning = false
+    private var playWhenPlanned = false
+    private var chosen: [String: String] = [:]      // language -> voice id, the person's choices
+    private var gender = 2                          // 1 male, 2 female: for languages without a choice
+    private var voiceMap: [String: String] = [:]    // language -> voice id, for this text
+    private var speechSpeed = Speed.standard
     private let player = Player()
     private let samplePlayer = Player()
-    private var generator: Generator?
-    private var generatorText = ""
-    private var generatorVoice = -1
-    private var preparing = false
+    private var samples: [String: Speech] = [:]     // voice + speed -> its sample, spoken once a session
+    private var listening: String?                  // the voice whose sample plays
+    private var resumePart = 0                      // where Play goes on after the voice or speed changed while paused
     private var saving: Saving?
     private var fileName: String?
+    private var planTimer: Timer?
+    private var speedTimer: Timer?
 
     // MARK: size
 
@@ -149,7 +144,9 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
         setFrameAutosaveName("")
         build()
         restoreSettings()
-        refreshModelState()
+        Engine.shared.onVoices = { [weak self] in self?.voicesChanged() }
+        Engine.shared.loadVoices()
+        refreshControls()
         makeFirstResponder(textView)
     }
 
@@ -198,6 +195,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
         voicePopover.delegate = self
         voiceList.onChoose = { [weak self] in self?.choose($0) }
         voiceList.onListen = { [weak self] in self?.listen($0) }
+        voiceList.onDownload = { [weak self] in self?.openVoiceSettings() }
 
         speedSlider.target = self; speedSlider.action = #selector(speedChanged)
         speedSlider.isContinuous = true
@@ -206,7 +204,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
         voicePopup.setAccessibilityLabel(L("Voice"))
         speedValue.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         speedValue.alignment = .right
-        speedLabel.font = .systemFont(ofSize: NSFont.systemFontSize)   // the menu says «Голос 1» by itself
+        speedLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
         topBar.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(topBar)
         let topLine = NSBox(); topLine.boxType = .separator; topLine.translatesAutoresizingMaskIntoConstraints = false
@@ -215,7 +213,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
             v.translatesAutoresizingMaskIntoConstraints = false
             topBar.addSubview(v)
         }
-        let valueWidth = ("0,00" as NSString).size(withAttributes: [.font: speedValue.font!]).width.rounded(.up) + 2
+        let valueWidth = ("0,0×" as NSString).size(withAttributes: [.font: speedValue.font!]).width.rounded(.up) + 2
         NSLayoutConstraint.activate([
             topBar.topAnchor.constraint(equalTo: root.topAnchor),
             topBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -254,7 +252,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
             b.target = self; b.action = act
             b.refusesFirstResponder = true
             b.translatesAutoresizingMaskIntoConstraints = false
-            playerRow.addSubview(b)
+            bar.addSubview(b)
         }
         timeLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize + 1, weight: .regular)
         timeLabel.textColor = .secondaryLabelColor
@@ -263,30 +261,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
         saveButton.bezelStyle = .rounded
         saveButton.refusesFirstResponder = true
         saveButton.translatesAutoresizingMaskIntoConstraints = false
-        playerRow.addSubview(timeLabel); playerRow.addSubview(saveButton)
-
-        downloadNote.textColor = .secondaryLabelColor
-        downloadNote.lineBreakMode = .byTruncatingTail
-        downloadNote.translatesAutoresizingMaskIntoConstraints = false
-        downloadNote.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        downloadButton.target = self; downloadButton.action = #selector(startDownload)
-        downloadButton.bezelStyle = .rounded
-        downloadButton.keyEquivalent = "\r"
-        cancelButton.target = self; cancelButton.action = #selector(cancelDownload)
-        cancelButton.bezelStyle = .rounded
-        progress.isIndeterminate = false
-        progress.minValue = 0; progress.maxValue = 1
-        progress.style = .bar
-        for v in [downloadNote, downloadButton, cancelButton, progress] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            downloadRow.addSubview(v)
-        }
-        for r in [playerRow, downloadRow] {
-            r.translatesAutoresizingMaskIntoConstraints = false
-            bar.addSubview(r)
-            NSLayoutConstraint.activate([r.leadingAnchor.constraint(equalTo: bar.leadingAnchor), r.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
-                                         r.topAnchor.constraint(equalTo: bar.topAnchor), r.bottomAnchor.constraint(equalTo: bar.bottomAnchor)])
-        }
+        bar.addSubview(timeLabel); bar.addSubview(saveButton)
 
         let m: CGFloat = 20
         NSLayoutConstraint.activate([
@@ -302,39 +277,29 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
             bar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             bar.heightAnchor.constraint(equalToConstant: Self.barHeight),
 
-            playButton.centerXAnchor.constraint(equalTo: playerRow.centerXAnchor),
-            playButton.centerYAnchor.constraint(equalTo: playerRow.centerYAnchor),
+            playButton.centerXAnchor.constraint(equalTo: bar.centerXAnchor),
+            playButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             playButton.widthAnchor.constraint(equalToConstant: 36),
             playButton.heightAnchor.constraint(equalToConstant: 36),
             backButton.trailingAnchor.constraint(equalTo: playButton.leadingAnchor, constant: -14),
-            backButton.centerYAnchor.constraint(equalTo: playerRow.centerYAnchor),
+            backButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             backButton.widthAnchor.constraint(equalToConstant: 30),
             backButton.heightAnchor.constraint(equalToConstant: 30),
             forwardButton.leadingAnchor.constraint(equalTo: playButton.trailingAnchor, constant: 14),
-            forwardButton.centerYAnchor.constraint(equalTo: playerRow.centerYAnchor),
+            forwardButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             forwardButton.widthAnchor.constraint(equalToConstant: 30),
             forwardButton.heightAnchor.constraint(equalToConstant: 30),
-            timeLabel.leadingAnchor.constraint(equalTo: playerRow.leadingAnchor, constant: m),
-            timeLabel.centerYAnchor.constraint(equalTo: playerRow.centerYAnchor),
+            timeLabel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: m),
+            timeLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             timeLabel.trailingAnchor.constraint(lessThanOrEqualTo: backButton.leadingAnchor, constant: -8),
-            saveButton.trailingAnchor.constraint(equalTo: playerRow.trailingAnchor, constant: -m),
-            saveButton.centerYAnchor.constraint(equalTo: playerRow.centerYAnchor),
+            saveButton.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -m),
+            saveButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             saveButton.leadingAnchor.constraint(greaterThanOrEqualTo: forwardButton.trailingAnchor, constant: 8),
-
-            downloadNote.leadingAnchor.constraint(equalTo: downloadRow.leadingAnchor, constant: m),
-            downloadNote.centerYAnchor.constraint(equalTo: downloadRow.centerYAnchor),
-            downloadButton.trailingAnchor.constraint(equalTo: downloadRow.trailingAnchor, constant: -m),
-            downloadButton.centerYAnchor.constraint(equalTo: downloadRow.centerYAnchor),
-            downloadNote.trailingAnchor.constraint(lessThanOrEqualTo: downloadButton.leadingAnchor, constant: -12),
-            cancelButton.trailingAnchor.constraint(equalTo: downloadRow.trailingAnchor, constant: -m),
-            cancelButton.centerYAnchor.constraint(equalTo: downloadRow.centerYAnchor),
-            progress.leadingAnchor.constraint(equalTo: downloadRow.leadingAnchor, constant: m),
-            progress.trailingAnchor.constraint(equalTo: cancelButton.leadingAnchor, constant: -12),
-            progress.centerYAnchor.constraint(equalTo: downloadRow.centerYAnchor),
         ])
 
         player.onChange = { [weak self] in self?.refreshPlayer() }
-        samplePlayer.onEnd = { [weak self] in self?.samplePlayer.load(nil); self?.listening = nil; self?.refreshVoices() }
+        samplePlayer.onEnd = { [weak self] in self?.stopListening() }
+        samplePlayer.onChange = { [weak self] in self?.refreshVoices() }
     }
 
     private func symbol(_ name: String, _ label: String, size: CGFloat = 13) -> NSImage? {
@@ -345,15 +310,15 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
     // MARK: settings
 
     private func restoreSettings() {
-        let v = UserDefaults.standard.integer(forKey: "voice")
-        voice = (0..<10).contains(v) ? v : 0
-        voicePopup.show(String(format: L("Voice %d"), voice + 1))
-        let stored = UserDefaults.standard.object(forKey: "speed") as? Double ?? Speed.standard
+        let d = UserDefaults.standard
+        chosen = d.dictionary(forKey: "voices") as? [String: String] ?? [:]
+        gender = d.integer(forKey: "gender") == 1 ? 1 : 2
+        let stored = d.object(forKey: "speed") as? Double ?? Speed.standard
         let s = Speed.round(min(Speed.max, max(Speed.min, stored)))
         speedSlider.doubleValue = s
         speedValue.stringValue = Speed.text(s)
-        player.speed = Float(s)
-        let size = UserDefaults.standard.double(forKey: "textSize")
+        speechSpeed = s
+        let size = d.double(forKey: "textSize")
         setTextSize(Self.sizes.contains(CGFloat(size)) ? CGFloat(size) : NSFont.systemFontSize)
     }
 
@@ -373,115 +338,149 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
     @objc func smallerText(_ s: Any?) { if let n = Self.sizes.last(where: { $0 < textSize }) { setTextSize(n) } }
     @objc func actualSizeText(_ s: Any?) { setTextSize(NSFont.systemFontSize) }
 
-    private var voiceIndex: Int { voice }
-    private var speed: Float { Float(Speed.round(speedSlider.doubleValue)) }
+    // MARK: voices
 
-    // MARK: model
-
-    private func refreshModelState() {
-        let here = Model.isHere
-        playerRow.isHidden = !here
-        downloadRow.isHidden = here
-        let downloading = download != nil
-        downloadNote.isHidden = downloading
-        downloadButton.isHidden = downloading
-        progress.isHidden = !downloading
-        cancelButton.isHidden = !downloading
-        downloadNote.stringValue = String(format: L("Voices need the Supertonic 3 model, %@."), sizeText(Model.totalSize))
-        if here && engine == nil && !loading { loadEngine() }
-        refreshControls()
+    /// The language whose voices the list shows: the text's main one; with no text, the app's, else the Mac's first.
+    private var listLanguage: String {
+        if let m = plan?.main, !text.isEmpty { return m }
+        let has = { (c: String) in Engine.shared.voices.contains { $0.code == c } }
+        if has(appLanguage) { return appLanguage }
+        for l in Locale.preferredLanguages {
+            let c = Locale(identifier: l).language.languageCode?.identifier ?? ""
+            if has(c) { return c }
+        }
+        return "en"
     }
 
-    private func loadEngine() {
-        loading = true
-        refreshControls()
-        let dir = Model.folder
-        let threads = Workers.threads
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result: Result<(Supertonic, [String: Voice]), Error> = Result {
-                let e = try Supertonic(onnxDir: dir.appendingPathComponent("onnx"), threads: threads)
-                var v: [String: Voice] = [:]
-                for id in Voices.ids { v[id] = try Voice(url: dir.appendingPathComponent("voice_styles/\(id).json")) }
-                return (e, v)
-            }
-            DispatchQueue.main.async {
-                self.loading = false
-                switch result {
-                case .success(let (e, v)):
-                    self.engine = e; self.voices = v
-                    if self.playWhenLoaded { self.playWhenLoaded = false; self.togglePlay() }
-                case .failure(let err):
-                    self.report(L("The model could not be loaded"), "\(Model.folder.path)\n\(err)")
-                }
-                self.refreshControls()
-            }
+    /// Voices appeared or went (at launch, or after a download in System Settings).
+    private func voicesChanged() {
+        if voicePopover.isShown { voiceList.build(language: listLanguage, voices: Engine.shared.voices); refreshVoices() }
+        pickVoices { [weak self] in
+            guard let self, let v = self.voiceMap[self.listLanguage] else { return }
+            Engine.shared.warm(voice: v)
         }
     }
 
-    @objc private func startDownload() {
-        let free = (try? Model.folder.deletingLastPathComponent().deletingLastPathComponent()
-            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage) ?? Int64.max
-        if free < Model.totalSize + 50_000_000 {
-            alert(L("Not enough disk space"), String(format: L("%1$@ needs %2$@. Free: %3$@."), "Supertonic 3",
-                                                          sizeText(Model.totalSize), sizeText(free)))
-            return
+    /// The voice for every language of the text, from the choices (in `tts`, the same rule as the command line).
+    private func pickVoices(then: (() -> Void)? = nil) {
+        var langs = plan?.langs ?? []
+        if !langs.contains(listLanguage) { langs.append(listLanguage) }
+        let want = (chosen, gender)
+        // Nothing chosen yet for the list's language: its voice of the same kind from the list itself (the list shows
+        // the person's region, `tts` alone would take the language's main one)
+        var ask = chosen
+        let list = VoiceMenu.voices(of: listLanguage, in: Engine.shared.voices)
+        if ask[listLanguage] == nil, let v = list.first(where: { $0.gender == gender }) ?? list.first { ask[listLanguage] = v.id }
+        Engine.shared.pick(langs: langs, chosen: ask, gender: gender) { [weak self] map in
+            guard let self, self.chosen == want.0, self.gender == want.1 else { return }
+            self.voiceMap = map
+            self.refreshVoiceTitle()
+            then?()
         }
-        progress.doubleValue = 0
-        download = ModelDownload(progress: { p in
-            DispatchQueue.main.async { self.progress.doubleValue = p }
-        }, done: { err in
-            DispatchQueue.main.async {
-                self.download = nil
-                if let err { Model.removeParts(); self.report(L("The download failed"), err) }
-                self.refreshModelState()
-            }
-        })
-        refreshModelState()
-        download?.start()
     }
 
-    @objc private func cancelDownload() {
-        download?.cancel()
-        download = nil
-        Model.removeParts()
-        refreshModelState()
+    private func refreshVoiceTitle() {
+        let code = listLanguage
+        let all = Engine.shared.voices
+        let list = VoiceMenu.voices(of: code, in: all)
+        if let id = voiceMap[code], let v = all.first(where: { $0.id == id }) {
+            voicePopup.show(VoiceMenu.title(v, among: list))
+        } else {
+            voicePopup.show(L("Voice"))
+        }
     }
 
-    @objc func showModel() {
-        guard FileManager.default.fileExists(atPath: Model.folder.path) else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([Model.folder])
+    /// A click on a voice's name chooses it, silently (listening is the waveform button). While the text is being
+    /// read, the new voice goes on from the start of the same sentence. Paused, Play goes on from there in the new voice.
+    private func choose(_ v: VoiceInfo) {
+        chosen[v.code] = v.id
+        if v.gender == 1 || v.gender == 2 { gender = v.gender }
+        UserDefaults.standard.set(chosen, forKey: "voices")
+        UserDefaults.standard.set(gender, forKey: "gender")
+        refreshVoices()
+        pickVoices { [weak self] in self?.restartSpeech() }
     }
 
-    @objc func deleteModel() {
-        guard Model.isHere || FileManager.default.fileExists(atPath: Model.folder.path) else { return }
-        let a = NSAlert()
-        a.messageText = L("Delete the Supertonic 3 model?")
-        a.informativeText = String(format: L("%@. The voices will need it downloaded again."), sizeText(Model.totalSize))
-        a.addButton(withTitle: L("Delete"))
-        a.addButton(withTitle: L("Cancel"))
-        a.buttons[0].hasDestructiveAction = true
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        stopAll()
-        releaseEngine()
-        do { try Model.delete() } catch { report(L("The model could not be deleted"), "\(error)") }
-        refreshModelState()
+    /// The speech in another voice or at another speed: from the start of the sentence being heard. His wish
+    /// (2026-11-10): the change is heard at once, and going back a little shows it changed.
+    private func restartSpeech() {
+        guard let s = player.speech, s.plan.text == textView.string else { return }
+        guard s.voices != voiceMap || s.speed != speechSpeed else { return }
+        let at = player.position.part
+        let wasPlaying = player.isPlaying
+        guard let new = try? Speech(plan: s.plan, voices: voiceMap, speed: speechSpeed) else { return }
+        s.cancel()
+        attach(new)
+        if wasPlaying {
+            player.load(new, part: at)
+        } else {
+            player.load(nil)
+            resumePart = at
+            pending = new
+        }
+        refreshControls()
     }
 
-    private func releaseEngine() {
-        // The engine goes only when nothing is using it.
-        generator?.cancel(); saving?.generator?.cancel()
-        generator?.wait(); saving?.generator?.wait()
-        generator = nil
-        engine = nil
-        voices = [:]
+    /// A speech made while paused waits here for Play.
+    private var pending: Speech?
+
+    private func attach(_ s: Speech) {
+        s.onChange = { [weak self] in self?.refreshPlayer() }
+        s.onError = { [weak self] e in self?.report(L("Speech could not be made"), e) }
+    }
+
+    private func openVoiceSettings() {
+        voicePopover.performClose(nil)
+        // System Settings › Accessibility › Spoken Content (macOS 13 and later), where System Voice › Manage Voices
+        // downloads Siri's voices; the app reads the voices again when it comes back to the front.
+        for u in ["x-apple.systempreferences:com.apple.Accessibility-Settings.extension?SpokenContent",
+                  "x-apple.systempreferences:com.apple.preference.universalaccess?SpeakableItems"] {
+            if let url = URL(string: u), NSWorkspace.shared.open(url) { return }
+        }
     }
 
     // MARK: text
 
     func textDidChange(_ n: Notification) {
-        if generator != nil || player.source != nil { stopAll() }
+        stopAll()
+        plan = nil
         refreshControls()
         textView.needsDisplay = true
+        schedulePlan()
+    }
+
+    /// The text step runs when typing stops for a moment, so Play starts at once.
+    private func schedulePlan(after: Double = 0.3) {
+        planTimer?.invalidate()
+        planTimer = Timer.scheduledTimer(withTimeInterval: after, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.makePlan() }
+        }
+    }
+
+    private func makePlan() {
+        let content = textView.string
+        guard !text.isEmpty else { plan = nil; refreshVoiceTitle(); return }
+        if plan?.text == content || planning { return }
+        planning = true
+        var p = Plan(text: content)
+        Engine.shared.plan(content, paragraph: { lang, sentences in
+            let l = lang ?? "en"
+            for (i, s) in sentences.enumerated() {
+                guard let a = s["from"] as? Int, let b = s["to"] as? Int, let t = s["text"] as? String else { continue }
+                p.parts.append(Part(from: a, to: b, lang: l, text: t, paragraphEnd: i == sentences.count - 1))
+                p.chars[l, default: 0] += t.count
+            }
+        }, done: { [weak self] err in
+            guard let self else { return }
+            self.planning = false
+            guard content == self.textView.string else { self.makePlan(); return }
+            if let err { self.playWhenPlanned = false; self.report(L("Speech could not be made"), err); return }
+            self.plan = p
+            self.pickVoices {
+                if self.playWhenPlanned { self.playWhenPlanned = false; self.togglePlay() }
+            }
+            self.refreshControls()
+        })
     }
 
     func focusText() { makeFirstResponder(textView) }
@@ -505,6 +504,8 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
             fileName = url.deletingPathExtension().lastPathComponent
             title = url.lastPathComponent
             makeFirstResponder(root)
+            plan = nil
+            schedulePlan(after: 0)
             refreshControls()
             textView.needsDisplay = true
         } catch {
@@ -529,64 +530,38 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
 
     func togglePlay() {
         stopListening()
-        if player.source != nil, generatorText == textView.string, generatorVoice == voiceIndex {
+        if let s = player.speech, s.plan.text == textView.string, s.voices == voiceMap, s.speed == speechSpeed {
             player.toggle(); return
         }
-        guard !text.isEmpty, !preparing else { return }
-        guard let engine, let voice = voices[Voices.ids[voiceIndex]] else {
-            if loading { playWhenLoaded = true }
+        guard !text.isEmpty else { return }
+        // the voice of every language of the text is known (the pick after the text step comes a moment later)
+        guard let plan, plan.text == textView.string, plan.langs.allSatisfy({ voiceMap[$0] != nil }) else {
+            playWhenPlanned = true
+            if !planning { schedulePlan(after: 0) }
+            refreshPlayer()
             return
         }
-        startGenerating(engine: engine, voice: voice, fromPiece: resumePiece, play: true)
-        resumePiece = 0
-    }
-
-    private func startGenerating(engine: Supertonic, voice: Voice, fromPiece: Int, play: Bool) {
-        let content = textView.string, vi = voiceIndex, sp = speed
-        preparing = true
-        refreshControls()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let script = Pieces.script(content, fallback: appLanguage)
-            let pieces = script.pieces
-            let result = Result { try Generator(engine: engine, pieces: pieces, voice: voice, voiceName: Voices.ids[vi], steps: flowSteps,
-                                                 speed: Speed.engine(sp), startAt: min(fromPiece, max(0, pieces.count - 1))) }
-            DispatchQueue.main.async {
-                self.preparing = false
-                guard content == self.textView.string, vi == self.voiceIndex else { self.refreshControls(); return }
-                switch result {
-                case .failure(let e): self.report(L("Speech could not be made"), "\(e)")
-                case .success(let g):
-                    self.generator?.cancel()
-                    self.generator = g
-                    self.sentences = script.sentences
-                    self.generatorText = content
-                    self.generatorVoice = vi
-                    g.onProgress = { DispatchQueue.main.async { self.refreshPlayer() } }
-                    g.onDone = { err in
-                        DispatchQueue.main.async {
-                            if let err, err != "cancelled", self.generator === g { self.player.pause(); self.report(L("Speech could not be made"), err) }
-                            self.refreshPlayer()
-                        }
-                    }
-                    let start = g.store.offsets.isEmpty ? 0 : g.store.offsets[min(fromPiece, g.store.offsets.count - 1)]
-                    self.player.load(g.store, at: fromPiece == 0 ? 0 : start)
-                    g.start(workers: Workers.count)
-                    if play { self.player.play() }
-                }
-                self.refreshControls()
-            }
+        guard !plan.parts.isEmpty else { return }
+        let s: Speech
+        if let p = pending, p.plan.text == plan.text, p.voices == voiceMap, p.speed == speechSpeed { s = p }
+        else {
+            pending?.cancel()
+            guard let n = try? Speech(plan: plan, voices: voiceMap, speed: speechSpeed) else { return }
+            attach(n); s = n
         }
+        pending = nil
+        player.load(s, part: resumePart)
+        resumePart = 0
+        player.play()
     }
 
     private func stopAll() {
-        generator?.cancel()
-        generator = nil
-        generatorText = ""
-        generatorVoice = -1
+        player.speech?.cancel()
+        pending?.cancel(); pending = nil
         player.pause()
         player.load(nil)
-        sentences = []
-        resumePiece = 0
+        resumePart = 0
+        playWhenPlanned = false
         stopListening()
         refreshControls()
     }
@@ -596,87 +571,89 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
     @objc private func forward() { skip(15) }
 
     func skip(_ s: Double) {
-        guard player.source != nil else { return }
+        guard player.speech != nil else { return }
         player.skip(seconds: s)
-    }
-
-    /// A click on a voice's name chooses it, silently (the author's design, 2026-11-10; listening is the waveform
-    /// button). While the text is being read, the new voice goes on reading from the same place. Paused, the sound
-    /// made in the old voice goes but the place stays: Play goes on from it in the new voice.
-    private func choose(_ i: Int) {
-        guard i != voice else { return }
-        voice = i
-        UserDefaults.standard.set(i, forKey: "voice")
-        voicePopup.show(String(format: L("Voice %d"), i + 1))
-        refreshVoices()
-        if let g = generator, player.isPlaying, let engine, let v = voices[Voices.ids[i]] {
-            let piece = g.store.piece(at: player.position)
-            g.cancel()
-            generator = nil
-            player.pause()
-            player.load(nil)
-            startGenerating(engine: engine, voice: v, fromPiece: piece, play: true)
-            return
-        }
-        guard generator != nil || player.source != nil else { return }
-        if let g = generator { resumePiece = g.store.piece(at: player.position) }
-        generator?.cancel()
-        generator = nil
-        generatorText = ""
-        generatorVoice = -1
-        player.pause()
-        player.load(nil)
-        sentences = []
-        refreshControls()
     }
 
     @objc private func speedChanged() {
         let s = Speed.round(speedSlider.doubleValue)
         speedSlider.doubleValue = s
         speedValue.stringValue = Speed.text(s)
-        player.speed = Float(s)
-        samplePlayer.speed = Float(s)
         UserDefaults.standard.set(s, forKey: "speed")
-        refreshPlayer()
+        // The voice speaks anew at the new speed once the slider rests (dragging would start it over and over).
+        speedTimer?.invalidate()
+        let up = NSApp.currentEvent?.type == .leftMouseUp
+        speedTimer = Timer.scheduledTimer(withTimeInterval: up ? 0 : 0.35, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.speechSpeed != s else { return }
+                self.speechSpeed = s
+                self.stopListening()
+                self.restartSpeech()
+            }
+        }
     }
 
     // MARK: listening
 
     private func showVoices() {
         if voicePopover.isShown { voicePopover.performClose(nil); return }
-        _ = voiceList.view
+        voiceList.build(language: listLanguage, voices: Engine.shared.voices)
         refreshVoices()
         voicePopover.show(relativeTo: voicePopup.bounds, of: voicePopup, preferredEdge: .maxY)
     }
 
     func popoverDidClose(_ n: Notification) { stopListening() }
 
-    /// A voice's ready sample, at once; the same button again stops it. Reading the text pauses meanwhile.
-    private func listen(_ i: Int) {
-        if listening == i { stopListening(); return }
+    /// A voice reads its sample at the speed set; the same button again stops it. Reading the text pauses meanwhile.
+    /// Samples are spoken on this Mac by its own voices (Apple's licence allows no recordings of them in the app) and
+    /// kept in memory until the app quits.
+    private func listen(_ v: VoiceInfo) {
+        if listening == v.id { stopListening(); return }
         stopListening()
-        let sp = speed
-        guard let src = Clips.load(voice: Voices.ids[i], lang: Clips.language(for: text), speed: Clips.speed(for: sp)) else { return }
         if player.isPlaying { player.pause() }
-        samplePlayer.speed = sp
-        samplePlayer.load(src)
+        listening = v.id
+        let key = "\(v.id) \(speechSpeed)"
+        if let s = samples[key] { play(sample: s); return }
+        let sampleText = Samples.text(for: v.code, from: textView.string)
+        var p = Plan(text: sampleText)
+        Engine.shared.plan(sampleText, paragraph: { _, sentences in
+            for (i, s) in sentences.enumerated() {
+                guard let t = s["text"] as? String else { continue }
+                p.parts.append(Part(from: 0, to: 0, lang: v.code, text: t, paragraphEnd: i == sentences.count - 1))
+            }
+        }, done: { [weak self] _ in
+            guard let self, self.listening == v.id, !p.parts.isEmpty, let s = try? Speech(plan: p, voices: [v.code: v.id], speed: self.speechSpeed)
+            else { return }
+            s.concurrency = 1
+            self.samples[key] = s
+            self.play(sample: s)
+        })
+        refreshVoices()
+    }
+
+    private func play(sample s: Speech) {
+        s.onChange = { [weak self] in self?.refreshVoices() }
+        samplePlayer.load(s)
         samplePlayer.play()
-        listening = i
         refreshVoices()
     }
 
     private func stopListening() {
-        if samplePlayer.source != nil { samplePlayer.pause(); samplePlayer.load(nil) }
+        if samplePlayer.speech != nil { samplePlayer.pause(); samplePlayer.load(nil) }
         listening = nil
         refreshVoices()
     }
 
-    private func refreshVoices() { if voiceList.isViewLoaded { voiceList.show(chosen: voice, playing: listening) } }
+    private func refreshVoices() {
+        guard voiceList.isViewLoaded else { return }
+        let loading = listening != nil && (samplePlayer.speech == nil || samplePlayer.isWaiting)
+        voiceList.show(chosen: voiceMap[listLanguage], listening: listening, loading: loading)
+    }
 
     // MARK: save
 
     @objc func saveMP3() {
-        guard !text.isEmpty, engine != nil, saving == nil else { return }
+        guard !text.isEmpty, saving == nil else { return }
         let p = NSSavePanel()
         p.allowedContentTypes = [.mp3]
         p.nameFieldStringValue = suggestedName() + ".mp3"
@@ -694,26 +671,29 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
         return clean.isEmpty ? "TTS" : String(clean.prefix(60))
     }
 
-    private func save(to url: URL) {
-        guard let engine, let voice = voices[Voices.ids[voiceIndex]] else { return }
+    /// The MP3 is the speech as heard: this voice, this speed, the same pauses. What is spoken already is used; the rest
+    /// is spoken now by all the workers.
+    @objc func save(to url: URL) {
         let s = Saving(window: self)
         saving = s
         refreshControls()
-        // The sound already made is used when it is whole and at this speed; otherwise the text is spoken anew at
-        // the chosen speed (the engine's own speed sounds better than stretching, measured).
-        if let store = player.source as? SampleStore, store.isComplete, store.speed == Speed.engine(speed),
-           generatorText == textView.string, generatorVoice == voiceIndex {
-            s.encode(store, to: url, speed: speed) { self.saveDone(url, $0) }
-            return
+        func go() {
+            guard let plan, plan.text == textView.string else { saveDone(url, L("The text changed")); return }
+            let speech: Speech
+            if let cur = player.speech ?? pending, cur.plan.text == plan.text, cur.voices == voiceMap, cur.speed == speechSpeed { speech = cur }
+            else {
+                guard let n = try? Speech(plan: plan, voices: voiceMap, speed: speechSpeed) else { saveDone(url, "Speech"); return }
+                attach(n); pending?.cancel(); pending = n; speech = n
+            }
+            s.save(speech, to: url, title: url.deletingPathExtension().lastPathComponent) { [weak self] in self?.saveDone(url, $0) }
         }
-        let content = textView.string, vi = voiceIndex, sp = speed
-        DispatchQueue.global(qos: .userInitiated).async {
-            let pieces = Pieces.make(content, fallback: appLanguage)
-            let r = Result { try Generator(engine: engine, pieces: pieces, voice: voice, voiceName: Voices.ids[vi], steps: flowSteps, speed: Speed.engine(sp)) }
-            DispatchQueue.main.async {
-                switch r {
-                case .failure(let e): self.saveDone(url, "\(e)")
-                case .success(let g): s.generate(g, to: url, speed: sp) { self.saveDone(url, $0) }
+        let ready = { self.plan?.text == self.textView.string && (self.plan?.langs.allSatisfy { self.voiceMap[$0] != nil } ?? false) }
+        if ready() { go() } else {
+            schedulePlan(after: 0)
+            Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] t in
+                MainActor.assumeIsolated {
+                    guard let self, self.saving === s else { t.invalidate(); return }
+                    if ready() { t.invalidate(); go() }
                 }
             }
         }
@@ -722,46 +702,36 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
     private func saveDone(_ url: URL, _ err: String?) {
         saving?.close()
         saving = nil
-        if let err, err != "cancelled" {
-            try? FileManager.default.removeItem(at: url)
-            report(L("The MP3 could not be saved"), err)
-        } else if err == "cancelled" {
-            try? FileManager.default.removeItem(at: url)
-        }
+        if let err { try? FileManager.default.removeItem(at: url); if err != "cancelled" { report(L("The MP3 could not be saved"), err) } }
         refreshControls()
     }
 
     // MARK: state
 
     private func refreshControls() {
-        let ready = engine != nil
         let hasText = !text.isEmpty
-        voicePopup.isEnabled = true     // the samples need no model
-        speedSlider.isEnabled = true
-        playButton.isEnabled = (ready || loading) && (hasText || player.source != nil)
-        saveButton.isEnabled = ready && hasText && saving == nil
+        playButton.isEnabled = hasText || player.speech != nil
+        saveButton.isEnabled = hasText && saving == nil
         refreshPlayer()
     }
 
     private func refreshPlayer() {
-        let playing = player.isPlaying
+        let playing = player.isPlaying || playWhenPlanned
         playButton.image = symbol(playing ? "pause.fill" : "play.fill", playing ? L("Pause") : L("Play"), size: 22)
         playButton.toolTip = playing ? L("Pause") : L("Play")
-        let has = player.source != nil
+        let has = player.speech != nil
         backButton.isEnabled = has
         forwardButton.isEnabled = has
-        if let s = player.source {
-            let r = Double(player.rate), sr = Double(s.sampleRate)
-            timeLabel.stringValue = "\(clock(Double(player.position) / sr / r)) / \(clock(Double(s.total) / sr / r))"
+        if has {
+            timeLabel.stringValue = "\(clock(Double(player.now) / Double(Speech.rate))) / \(clock(Double(player.total) / Double(Speech.rate)))"
         } else {
-            timeLabel.stringValue = preparing ? "–:–– / –:––" : "0:00 / 0:00"
+            timeLabel.stringValue = playWhenPlanned ? "–:–– / –:––" : "0:00 / 0:00"
         }
         refreshHighlight()
     }
 
     // MARK: highlight
 
-    private var sentences: [NSRange] = []
     private var highlighted: NSRange?
 
     /// The sentence being read is marked in the text, which scrolls to keep it in view. Shown while playing and while
@@ -769,10 +739,13 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
     /// jumping the view to the top would only lose the reader's place).
     private func refreshHighlight() {
         var r: NSRange?
-        if let g = generator, player.source === g.store, player.isPlaying || player.position > 0,
-           let i = g.sentence(at: player.position), i < sentences.count,
-           NSMaxRange(sentences[i]) <= (textView.string as NSString).length {
-            r = sentences[i]
+        if let s = player.speech, s.plan.text == textView.string {
+            let pos = player.position
+            if (player.isPlaying || pos.part > 0 || pos.frame > 0), pos.part < s.parts.count {
+                let p = s.parts[pos.part]
+                let range = NSRange(location: p.from, length: p.to - p.from)
+                if NSMaxRange(range) <= (textView.string as NSString).length { r = range }
+            }
         }
         guard r != highlighted else { return }
         guard let lm = textView.layoutManager else { return }
@@ -830,11 +803,10 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
 
     override func validateMenuItem(_ i: NSMenuItem) -> Bool {
         switch i.action {
-        case #selector(saveMP3): return engine != nil && !text.isEmpty && saving == nil
+        case #selector(saveMP3): return !text.isEmpty && saving == nil
         case #selector(biggerText(_:)): return textSize < Self.sizes.last!
         case #selector(smallerText(_:)): return textSize > Self.sizes.first!
         case #selector(actualSizeText(_:)): return textSize != NSFont.systemFontSize
-        case #selector(showModel), #selector(deleteModel): return FileManager.default.fileExists(atPath: Model.folder.path) && download == nil
         default: return super.validateMenuItem(i)
         }
     }
@@ -858,30 +830,15 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
 
     override func becomeKey() { super.becomeKey(); fitColumn() }
 
-    /// Quitting: everything that uses the engine stops first, then the engine goes. ONNX Runtime's own clean-up at
-    /// exit crashes when a model is still loaded or running (measured: «mutex lock failed»), so if something can't stop
-    /// in time the process ends without that clean-up.
     func shutDown() {
-        download?.cancel()
-        Model.removeParts()
         player.shutDown()
         samplePlayer.shutDown()
-        generator?.cancel(); saving?.generator?.cancel()
-        let stopped = (generator?.wait(seconds: 3) ?? true) && (saving?.generator?.wait(seconds: 3) ?? true)
-            && !loading
-        if stopped { releaseEngine() } else { _exit(0) }
+        player.speech?.cancel(); pending?.cancel()
+        samples.values.forEach { $0.cancel() }
+        Engine.shared.shutDown()
     }
 
     // MARK: messages
-
-    func sizeText(_ bytes: Int64) -> String {
-        (Double(bytes) / 1_000_000).rounded().formatted(.number.locale(appLocale)) + " " + L("MB")
-    }
-
-    private func alert(_ t: String, _ info: String) {
-        let a = NSAlert(); a.messageText = t; a.informativeText = info
-        a.beginSheetModal(for: self)
-    }
 
     /// Errors are shown in full and can be copied as a report.
     func report(_ t: String, _ detail: String) {
@@ -900,13 +857,16 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
 }
 
 
-/// Saving an MP3: a sheet with progress and Cancel, the speech made anew if needed, then encoded.
-final class Saving {
+/// Saving an MP3: a sheet with progress and Cancel; the sentences not spoken yet are spoken by all the workers, then
+/// everything is encoded with the pauses as heard.
+@MainActor final class Saving {
     private let sheet: NSWindow
     private let bar = NSProgressIndicator()
     private weak var window: NSWindow?
-    private(set) var generator: Generator?
     private var cancelled = false
+    private var speech: Speech?
+    private var watch: Timer?
+    private var done: ((String?) -> Void)?
 
     init(window: NSWindow) {
         self.window = window
@@ -933,55 +893,65 @@ final class Saving {
 
     @objc private func cancelPressed() {
         cancelled = true
-        generator?.cancel()
+        restore()
+        watch?.invalidate()
+        done?("cancelled"); done = nil
     }
 
-    func close() { window?.endSheet(sheet) }
+    func close() { watch?.invalidate(); window?.endSheet(sheet) }
 
-    func generate(_ g: Generator, to url: URL, speed: Float, done: @escaping (String?) -> Void) {
-        generator = g
-        let total = Double(g.store.lengths.count)
-        var made = 0.0
-        g.onProgress = { DispatchQueue.main.async { made += 1; self.bar.doubleValue = 0.92 * made / total } }
-        g.onDone = { err in
-            DispatchQueue.main.async {
-                if self.cancelled { done("cancelled"); return }
-                if let err { done(err); return }
-                self.encode(g.store, to: url, speed: speed, from: 0.92, done: done)
+    private func restore() { speech?.concurrency = 2; speech?.ahead = 600 }
+
+    func save(_ s: Speech, to url: URL, title: String, done: @escaping (String?) -> Void) {
+        speech = s
+        self.done = done
+        s.ahead = .infinity
+        s.concurrency = Engine.limit
+        let total = Double(max(1, s.parts.count))
+        watch = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] t in
+            MainActor.assumeIsolated {
+                guard let self, !self.cancelled else { t.invalidate(); return }
+                self.bar.doubleValue = 0.9 * Double(s.doneCount) / total
+                guard s.isComplete else { return }
+                t.invalidate()
+                self.restore()
+                self.encode(s, to: url, title: title)
             }
         }
-        g.start(workers: Workers.count)
     }
 
-    /// `speed` is the speed chosen; the part the engine didn't make is stretched as the player does it.
-    func encode(_ store: SampleStore, to url: URL, speed: Float, from start: Double = 0, done: @escaping (String?) -> Void) {
+    private func encode(_ s: Speech, to url: URL, title: String) {
+        if let p = s.parts.indices.first(where: { s.isFailed($0) }) {
+            done?("«\(s.parts[p].text.prefix(80))»"); done = nil; return
+        }
+        guard let layout = s.layout() else { done?("incomplete"); done = nil; return }
+        let file = s.file
+        let check = { [weak self] () -> Bool in self?.cancelled ?? true }
         DispatchQueue.global(qos: .userInitiated).async {
             let r: String? = {
                 do {
-                    let w = try MP3Writer(url: url, sampleRate: store.sampleRate, title: url.deletingPathExtension().lastPathComponent)
-                    let rate = speed / store.speed
-                    let stretch = abs(rate - 1) > 0.001 ? try OfflineStretch(sampleRate: store.sampleRate, rate: rate) : nil
-                    let block = 1 << 16
-                    var buf = [Float](repeating: 0, count: block)
-                    var at = 0
-                    while at < store.total {
-                        if self.cancelled { return "cancelled" }
-                        let n = buf.withUnsafeMutableBufferPointer { store.read(at: at, count: block, into: $0.baseAddress!) }
-                        if n <= 0 { break }
-                        try buf.withUnsafeBufferPointer { b in
-                            if let stretch { try stretch.feed(b.baseAddress!, count: n) { try w.write($0, count: $1) } }
-                            else { try w.write(b.baseAddress!, count: n) }
+                    let w = try MP3Writer(url: url, sampleRate: Speech.rate, title: title)
+                    var buf = [Float](repeating: 0, count: 1 << 16)
+                    let zeros = [Float](repeating: 0, count: 1 << 16)
+                    for (k, x) in layout.enumerated() {
+                        if k % 20 == 0, DispatchQueue.main.sync(execute: { MainActor.assumeIsolated { check() } }) { return "cancelled" }
+                        var at = 0
+                        while at < x.frames {
+                            let got = buf.withUnsafeMutableBufferPointer { file.read(at: x.offset + at, count: min($0.count, x.frames - at), into: $0.baseAddress!) }
+                            if got <= 0 { break }
+                            try buf.withUnsafeBufferPointer { try w.write($0.baseAddress!, count: got) }
+                            at += got
                         }
-                        at += n
-                        let p = start + (1 - start) * Double(at) / Double(store.total)
-                        DispatchQueue.main.async { self.bar.doubleValue = p }
+                        var g = x.gap
+                        while g > 0 { let n = min(g, zeros.count); try zeros.withUnsafeBufferPointer { try w.write($0.baseAddress!, count: n) }; g -= n }
+                        let f = 0.9 + 0.1 * Double(k + 1) / Double(layout.count)
+                        DispatchQueue.main.async { MainActor.assumeIsolated { self.bar.doubleValue = f } }
                     }
-                    try stretch?.finish { try w.write($0, count: $1) }
                     try w.finish()
                     return nil
                 } catch { return "\(url.path)\n\(error)" }
             }()
-            DispatchQueue.main.async { done(r) }
+            DispatchQueue.main.async { MainActor.assumeIsolated { if r != "cancelled" { self.done?(r); self.done = nil } } }
         }
     }
 }

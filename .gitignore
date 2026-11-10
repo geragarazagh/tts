@@ -3,7 +3,6 @@ TTS.app
 *.dmg
 .release
 appcast.xml
-vendor/onnxruntime/lib
 vendor/Sparkle.framework
 bench
 icon

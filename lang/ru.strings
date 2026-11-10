@@ -1,8 +1,6 @@
 /* Menu terms as TextEdit has them on macOS 27 (Edit.loctable), the rest written for TTS. */
 "About TTS" = "О приложении TTS";
 "Check for Updates…" = "Проверить наличие обновлений…";
-"Show Model in Finder" = "Показать модель в Finder";
-"Delete Model…" = "Удалить модель…";
 "Services" = "Службы";
 "Hide TTS" = "Скрыть TTS";
 "Hide Others" = "Скрыть остальные";
@@ -37,11 +35,8 @@
 "Bring All to Front" = "Все окна — на передний план";
 "Herman Harazha" = "Герман Гаража";
 "GitHub" = "Гитхаб";
-"Voices: Supertonic 3 by Supertone" = "Голоса: Supertonic 3 от Supertone";
 
 "Voice" = "Голос";
-"Male" = "Мужские";
-"Female" = "Женские";
 "Voice %d" = "Голос %d";
 "Speed" = "Скорость";
 "Paste text or drop a file" = "Вставьте текст или перетащите файл";
@@ -51,18 +46,13 @@
 "Forward 15 Seconds" = "Вперёд на 15 секунд";
 "Saving MP3…" = "Сохранение MP3…";
 "Cancel" = "Отменить";
-"Download" = "Скачать";
-"MB" = "МБ";
-"Voices need the Supertonic 3 model, %@." = "Для голосов нужна модель Supertonic 3, %@.";
-"Not enough disk space" = "Не хватает места на диске";
-"%1$@ needs %2$@. Free: %3$@." = "%1$@ занимает %2$@. Свободно: %3$@.";
-"The download failed" = "Скачать не удалось";
-"Delete the Supertonic 3 model?" = "Удалить модель Supertonic 3?";
-"%@. The voices will need it downloaded again." = "%@. Для голосов её нужно будет скачать снова.";
-"The model could not be deleted" = "Модель не удалось удалить";
-"The model could not be loaded" = "Модель не удалось открыть";
 "This file could not be read" = "Этот файл не удалось прочитать";
 "Speech could not be made" = "Речь не удалось создать";
 "The MP3 could not be saved" = "MP3 не удалось сохранить";
 "Listen" = "Послушать";
 "Stop" = "Остановить";
+"Voices: Apple" = "Голоса: Apple";
+"Download Siri Voices…" = "Загрузить голоса Siri…";
+"System voice ⓘ › %@" = "Голос системы ⓘ › %@";
+"System voice › Manage Voices…" = "Голос системы › Управление голосами…";
+"The text changed" = "Текст изменился";

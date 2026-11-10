@@ -1,4 +1,4 @@
-// Shared by the app and its tools: text in the system's language, names of the voices.
+// Shared by the app's files: text in the system's language.
 
 import Foundation
 
@@ -7,14 +7,9 @@ func L(_ s: String) -> String { NSLocalizedString(s, comment: "") }
 let appLanguage = Bundle.main.preferredLocalizations.first ?? "en"
 let appLocale = Locale(identifier: appLanguage)
 
-
-extension Speed {
-    static func text(_ v: Double) -> String { v.formatted(.number.precision(.fractionLength(2)).locale(appLocale)) }
+/// Defaults set before AppKit starts. ApplePersistence off: macOS keeps no saved state of the app at all (with the
+/// global ApplePersistenceIgnoreState some Macs have, AppKit otherwise writes $TMPDIR/<id>.savedState even for a
+/// window that is not restorable; seen 2026-11-10).
+func registerAppDefaults() {
+    UserDefaults.standard.register(defaults: ["ApplePersistence": false, "NSQuitAlwaysKeepsWindows": false, "speed": Speed.standard])
 }
-
-// The ten voices as Supertone names and orders them, shown as plain numbers.
-enum Voices {
-    static let ids = ["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5"]
-}
-
-

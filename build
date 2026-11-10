@@ -3,22 +3,11 @@
 set -e
 cd "${0:A:h}"
 # It changes per release, not per build.
-# min 13.3: ONNX Runtime 1.22 is the newest release whose macOS library loads on 13 (13.3, the first 13 with
-# std::to_chars for floats); 1.23 asks for 13.4, 1.24 and newer for 14 (measured with otool, 2026-11-09).
-version=0.2 min=13.3 id=com.geragaraza.tts app=TTS.app ort=1.22.0
+version=0.3 min=13.0 id=com.geragaraza.tts app=TTS.app
 tmp=$(mktemp -d); trap 'rm -rf $tmp' EXIT
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
 
-# ONNX Runtime (MIT, Microsoft), the official macOS arm64 release; the C API header is in vendor/onnxruntime/include.
-if [ ! -f vendor/onnxruntime/lib/libonnxruntime.$ort.dylib ]; then
-  curl -fsSL -o $tmp/ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v$ort/onnxruntime-osx-arm64-$ort.tgz
-  tar -xzf $tmp/ort.tgz -C $tmp
-  mkdir -p vendor/onnxruntime/lib
-  cp $tmp/onnxruntime-osx-arm64-$ort/lib/libonnxruntime.$ort.dylib vendor/onnxruntime/lib/
-  ln -sf libonnxruntime.$ort.dylib vendor/onnxruntime/lib/libonnxruntime.dylib
-fi
-cp vendor/onnxruntime/lib/libonnxruntime.$ort.dylib "$app/Contents/Frameworks/"
 # LAME 4.0 (LGPL), built from its source for 13.0 arm64 as a separate library (vendor/lame; how: lame.txt).
 cp vendor/lame/lib/libmp3lame.0.dylib "$app/Contents/Frameworks/"
 
@@ -39,10 +28,10 @@ for b in Sparkle Autoupdate Updater.app/Contents/MacOS/Updater; do
 done
 
 swiftc -O -target arm64-apple-macos$min -module-name TTS -parse-as-library \
-  -I vendor/onnxruntime/include -L vendor/onnxruntime/lib -I vendor/lame/include -L vendor/lame/lib -F vendor -framework Sparkle \
+  -I vendor/lame/include -L vendor/lame/lib -F vendor -framework Sparkle \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
-  -o "$app/Contents/MacOS/TTS" app.swift common.swift window.swift engine.swift speech.swift player.swift model.swift download.swift \
-  text.swift mp3.swift stretch.swift samples.swift updates.swift voices.swift 2>&1 | grep -E "error" || true
+  -o "$app/Contents/MacOS/TTS" app.swift common.swift window.swift engine.swift speech.swift player.swift \
+  text.swift mp3.swift updates.swift voices.swift 2>&1 | grep -E "error" || true
 [ -x "$app/Contents/MacOS/TTS" ]
 
 # Icon, as STT: icon.swift draws the picture, Icon Composer's format, actool compiles it (see STT's build for why
@@ -69,8 +58,8 @@ for r in Default Dark; do
   sips -p 256 256 $tmp/$r.png --out docs/icon${${r:#Default}:+-dark}.png >/dev/null
 done
 cp LICENSE THIRD-PARTY-LICENSES.md "$app/Contents/Resources/" 2>/dev/null || true
-# The ready voice samples (voices.swift, Clips), made by bench/clips.
-ditto Samples "$app/Contents/Resources/Samples"
+# The voices' engine: the `tts` script, the same file as the author's command line tool (engine.swift says why).
+cp tts "$app/Contents/Resources/tts"
 
 # Text files of every kind open in TTS from Finder's Open With and by dropping on the Dock icon. Alternate: never the
 # default app for a type someone else owns.
@@ -123,9 +112,7 @@ $([ "${SIGN_ID:--}" = - ] && echo '<key>com.apple.security.cs.disable-library-va
 </dict></plist>
 PLIST
 sign=${SIGN_ID:--}; stamp=(); [ "$sign" = - ] || stamp=(--timestamp)
-for l in "$app/Contents/Frameworks/libonnxruntime.$ort.dylib" "$app/Contents/Frameworks/libmp3lame.0.dylib"; do
-  codesign -f -s "$sign" $stamp --options runtime "$l"
-done
+codesign -f -s "$sign" $stamp --options runtime "$app/Contents/Frameworks/libmp3lame.0.dylib"
 for p in "$sp/Versions/B/Autoupdate" "$sp/Versions/B/Updater.app" "$sp"; do codesign -f -s "$sign" $stamp --options runtime "$p"; done
 codesign -f -s "$sign" $stamp --options runtime --entitlements $tmp/e.plist --identifier $id "$app"
 echo Done

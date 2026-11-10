@@ -1,8 +1,7 @@
 // MP3 through LAME 4.0 (LGPL, lame.sourceforge.io, a separate library in the bundle): macOS reads MP3 but has no
-// encoder for it. Mono, 44.1 kHz as the model makes it, VBR quality 2 (LAME's -V 2, its recommended transparent
-// setting), with the LAME tag at the start so every player shows the exact length at once, and an ID3v2.4 tag: the
-// title, and a comment saying the speech is synthetic, which the model's licence (OpenRAIL-M, Attachment A, e) asks
-// of anyone who publishes it.
+// encoder for it. Mono, 48 kHz as Siri speaks, VBR quality 2 (LAME's -V 2, its recommended transparent setting), with
+// the LAME tag at the start so every player shows the exact length at once, and an ID3v2.4 tag: the title, and a
+// comment saying the speech is synthetic.
 
 import CLame
 import Foundation
@@ -29,7 +28,7 @@ final class MP3Writer {
         id3tag_add_v2_4_UTF8(l)
         id3tag_v2_only(l)
         _ = id3tag_set_textinfo_utf8(l, "TIT2", title)
-        _ = id3tag_set_comment_utf8(l, "eng", "", "Synthetic speech: Supertonic 3 (Supertone), made with TTS")
+        _ = id3tag_set_comment_utf8(l, "eng", "", "Synthetic speech, made with TTS")
         guard lame_init_params(l) >= 0 else { lame_close(l); throw EngineError(description: "lame_init_params") }
         tagSize = lame_get_id3v2_tag(l, nil, 0)
         guard FileManager.default.createFile(atPath: url.path, contents: nil) else {

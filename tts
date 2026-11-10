@@ -1,0 +1,1270 @@
+#!/usr/bin/osascript -l JavaScript
+// tts - read a text aloud into an audio file with the Mac's own voices, Siri voices included.
+// The engine of the TTS app (github.com/geragarazagh/tts) and a command line tool of its own; everything
+// is a flag. Built into macOS: osascript, AVFoundation, NaturalLanguage, afconvert. Optional: ffmpeg
+// (Homebrew) for mp3.
+//
+//   tts [-v VOICE] [-r SPEED] [-p PITCH] [-l LANG] [-f FORMAT] [-o PATH] [-n NAME] FILE|-
+//   tts -t [-l LANG] FILE|-        print the text as it will be read (language per paragraph), no audio
+//   tts -L [LANG]                  list the voices
+//   tts --serve                    the app's worker: JSON requests on stdin (see serve())
+//
+// Why osascript (2026-11-10, measured on macOS 27.2 and a clean 26.6.2): macOS gives Siri voices
+// (Russian Voice 1 = Aleksei, Voice 2 = Yelena, Siri of other languages) only to Apple-signed
+// processes. osascript is one and ships with every Mac; a binary we compile is not, and `swift
+// file.swift` needs the developer tools (0.9 GB download).
+'use strict';
+ObjC.import('Foundation');
+ObjC.import('AVFoundation');
+ObjC.import('NaturalLanguage');
+ObjC.import('stdlib');
+
+// ---------------------------------------------------------------- small helpers
+
+var FM = $.NSFileManager.defaultManager;
+function say(fh, s) { fh.writeData($(s + '\n').dataUsingEncoding($.NSUTF8StringEncoding)); }
+function out(s) { say($.NSFileHandle.fileHandleWithStandardOutput, s); }
+function warn(s) { say($.NSFileHandle.fileHandleWithStandardError, 'tts: ' + s); }
+function die(s) { warn(s); cleanup(); $.exit(1); }
+function exists(p) { return FM.fileExistsAtPath(p); }
+function rm(p) { if (exists(p)) FM.removeItemAtPathError(p, null); }
+function readText(p) {
+  var s = $.NSString.stringWithContentsOfFileEncodingError(p, $.NSUTF8StringEncoding, null);
+  if (s.isNil()) s = $.NSString.stringWithContentsOfFileUsedEncodingError(p, null, null);
+  if (s.isNil()) s = $.NSString.stringWithContentsOfFileEncodingError(p, 11, null);   // Windows-1251
+  return s.isNil() ? null : s.js;
+}
+function writeText(p, s) { $(s).writeToFileAtomicallyEncodingError(p, true, $.NSUTF8StringEncoding, null); }
+function env(k) { var v = $.NSProcessInfo.processInfo.environment.objectForKey(k); return v.isNil() ? '' : v.js; }
+function sh(path, args) {        // runs a program, returns [status, stderr]
+  var t = $.NSTask.alloc.init, p = $.NSPipe.pipe;
+  t.executableURL = $.NSURL.fileURLWithPath(path);
+  t.arguments = $(args);
+  t.standardOutput = $.NSFileHandle.fileHandleWithNullDevice;
+  t.standardError = p;
+  if (!t.launchAndReturnError(null)) return [-1, 'cannot start ' + path];
+  var d = p.fileHandleForReading.readDataToEndOfFile;
+  t.waitUntilExit;
+  return [t.terminationStatus, $.NSString.alloc.initWithDataEncoding(d, $.NSUTF8StringEncoding).js || ''];
+}
+function which(name) {
+  var dirs = (env('PATH') + ':/opt/homebrew/bin:/usr/local/bin').split(':');
+  for (var i = 0; i < dirs.length; i++) if (dirs[i] && FM.isExecutableFileAtPath(dirs[i] + '/' + name)) return dirs[i] + '/' + name;
+  return null;
+}
+function clock(s) {
+  s = Math.round(s);
+  var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ':' + (m < 10 ? '0' : '') : '') + m + ':' + (x < 10 ? '0' : '') + x;
+}
+var TMP = null;
+function cleanup() { if (TMP) rm(TMP); TMP = null; }
+
+// ---------------------------------------------------------------- voices
+
+// Rank: Siri first (the voices of System Settings > Accessibility > Spoken Content > Voice N),
+// then Apple's premium, enhanced, compact. Novelty and Eloquence voices are left out.
+function score(v) {
+  var id = v.id;
+  if (/speech\.synthesis\.voice|eloquence|personalvoice/.test(id)) return -1;
+  if (/gryphon-neural/.test(id)) return 410;
+  if (/siri/.test(id)) return 405;
+  if (/gryphon/.test(id)) return 400;
+  if (v.quality >= 3) return 300;
+  if (v.quality == 2) return 200;
+  if (/super-compact/.test(id)) return 50;
+  return 100;
+}
+function kind(v) { var s = score(v); return s >= 400 ? 'Siri' : s >= 300 ? 'premium' : s >= 200 ? 'enhanced' : 'compact'; }
+// language code of a voice as the language detector names it
+function vcode(lang) {
+  if (/^zh-(TW|HK)/.test(lang)) return 'zh-Hant';
+  if (/^zh/.test(lang)) return 'zh-Hans';
+  return lang.split('-')[0];
+}
+// the region Apple itself treats as the language's main one
+var HOME = { en: 'US', es: 'ES', pt: 'BR', fr: 'FR', de: 'DE', ar: '001', nl: 'NL', it: 'IT' };
+var VOICES = null;
+function voices() {
+  if (VOICES) return VOICES;
+  var a = $.AVSpeechSynthesisVoice.speechVoices, r = [];
+  for (var i = 0; i < a.count; i++) {
+    var x = a.objectAtIndex(i);
+    var v = { id: x.identifier.js, name: x.name.js, lang: x.language.js, gender: Number(x.gender), quality: Number(x.quality) };
+    v.code = vcode(v.lang); v.score = score(v);
+    // listed but not there: a clean macOS 26 lists a super-compact Milena that voiceWithIdentifier cannot
+    // open (measured 2026-11-10 in the TTS app's test machine); such a voice would read nothing
+    if (v.score > 0 && !$.AVSpeechSynthesisVoice.voiceWithIdentifier(v.id).isNil()) r.push(v);
+  }
+  r.sort(function (a, b) {
+    return b.score - a.score || (b.lang.split('-')[1] == HOME[b.code]) - (a.lang.split('-')[1] == HOME[a.code]) || (b.gender == 2) - (a.gender == 2);
+  });
+  return (VOICES = r);
+}
+// best voice of a language for a gender (1 male, 2 female); the gender wins only within one
+// quality tier of the best voice, so «male» never falls to a robot from 2005 when a Siri voice exists
+function best(code, gender) {
+  var c = voices().filter(function (v) { return v.code == code; });
+  if (!c.length) return null;
+  var g = c.filter(function (v) { return v.gender == gender; })[0];
+  return g && g.score >= c[0].score - 100 ? g : c[0];
+}
+function findVoice(q) {
+  q = q.toLowerCase();
+  var all = voices();
+  return all.filter(function (v) { return v.id.toLowerCase() == q; })[0] ||
+    all.filter(function (v) { return v.name.toLowerCase() == q || v.id.toLowerCase().indexOf(q) >= 0; })[0] || null;
+}
+function listVoices(code) {
+  var vs = voices().filter(function (v) { return !code || v.code == code || v.lang.toLowerCase().indexOf(code.toLowerCase()) == 0; });
+  var picks = {};
+  vs.forEach(function (v) { [1, 2].forEach(function (g) { var b = best(v.code, g); if (b) picks[b.id] = (picks[b.id] || '') + (g == 1 ? 'm' : 'f'); }); });
+  var pad = function (s, n) { s = String(s); while (s.length < n) s += ' '; return s; };
+  vs.sort(function (a, b) { return a.lang < b.lang ? -1 : a.lang > b.lang ? 1 : b.score - a.score; });
+  vs.forEach(function (v) {
+    var p = picks[v.id] ? (picks[v.id].indexOf('f') >= 0 ? 'female' : '') + (picks[v.id] == 'mf' || picks[v.id] == 'fm' ? '+' : '') + (picks[v.id].indexOf('m') >= 0 ? 'male' : '') : '';
+    out(pad(v.lang, 7) + pad(v.name, 20) + pad(v.gender == 1 ? 'male' : v.gender == 2 ? 'female' : '-', 7) + pad(kind(v), 9) + pad(p, 12) + v.id);
+  });
+  if (!vs.length) out('no voices' + (code ? ' for ' + code : ''));
+}
+
+// ---------------------------------------------------------------- language of a paragraph
+
+var UKW = /(^|[^\p{L}])(це|та|що|як|але|дуже|якщо|коли|вони|його|її|від|для|при|між|або|ще|вже|також|тому|лише|навіть|було|буде|має|можна|який|яка|яке|які)(?![\p{L}])/giu;
+var RUW = /(^|[^\p{L}])(это|что|как|но|если|когда|они|только|уже|очень|его|её|для|при|между|или|ещё|также|поэтому|лишь|даже|было|будет|есть|можно|который|которая|которое|которые)(?![\p{L}])/giu;
+function detect(par) {
+  var letters = (par.match(/\p{L}/gu) || []).length;
+  if (!letters) return null;
+  var cyr = (par.match(/[Ѐ-ӿ]/g) || []).length, lat = (par.match(/[A-Za-z]/g) || []).length;
+  if (cyr && cyr >= lat * 0.5) {
+    // Russian text with English words stays Russian: one voice per paragraph (the author's Spoken Content
+    // rule: one Siri voice for ru and en, language detection off)
+    var uk = (par.match(/[іїєґІЇЄҐ]/g) || []).length * 2 + (par.match(UKW) || []).length;
+    var ru = (par.match(/[ыэъёЫЭЪЁ]/g) || []).length * 2 + (par.match(RUW) || []).length;
+    if (uk > ru) return 'uk';
+    if (ru > 0 || !/[ґєії]/i.test(par)) {
+      if (ru > 0) return 'ru';
+    }
+    var r = $.NLLanguageRecognizer.alloc.init;
+    r.languageConstraints = $(['ru', 'uk', 'bg', 'sr', 'be', 'kk', 'mk']);
+    r.processString(par);
+    var l = r.dominantLanguage;
+    return l.isNil() ? 'ru' : l.js;
+  }
+  // a short Latin line inside a Russian text (a name, a title) keeps the voice it is among
+  if (lat >= letters * 0.8 && (par.match(/\p{L}+/gu) || []).length < 4) return null;
+  var rec = $.NLLanguageRecognizer.alloc.init;
+  rec.processString(par);
+  var d = rec.dominantLanguage;
+  return d.isNil() ? null : d.js;
+}
+
+// ---------------------------------------------------------------- numbers to words (ru, uk)
+
+// cases: 0 nominative, 1 genitive, 2 dative, 3 accusative, 4 instrumental, 5 prepositional/locative
+var NOM = 0, GEN = 1, DAT = 2, ACC = 3, INS = 4, PREP = 5;
+function ends(stem, e) { return e.map(function (x) { return stem + x; }); }
+var L = {
+  ru: {
+    zero: ['ноль', 'ноля', 'нолю', 'ноль', 'нолём', 'ноле'],
+    one: { m: ['один', 'одного', 'одному', 'один', 'одним', 'одном'], f: ['одна', 'одной', 'одной', 'одну', 'одной', 'одной'], n: ['одно', 'одного', 'одному', 'одно', 'одним', 'одном'] },
+    two: { m: ['два', 'двух', 'двум', 'два', 'двумя', 'двух'], f: ['две', 'двух', 'двум', 'две', 'двумя', 'двух'] },
+    u: {
+      3: ['три', 'трёх', 'трём', 'три', 'тремя', 'трёх'], 4: ['четыре', 'четырёх', 'четырём', 'четыре', 'четырьмя', 'четырёх'],
+      5: ['пять', 'пяти', 'пяти', 'пять', 'пятью', 'пяти'], 6: ['шесть', 'шести', 'шести', 'шесть', 'шестью', 'шести'],
+      7: ['семь', 'семи', 'семи', 'семь', 'семью', 'семи'], 8: ['восемь', 'восьми', 'восьми', 'восемь', 'восемью', 'восьми'],
+      9: ['девять', 'девяти', 'девяти', 'девять', 'девятью', 'девяти'], 10: ['десять', 'десяти', 'десяти', 'десять', 'десятью', 'десяти'],
+      40: ['сорок', 'сорока', 'сорока', 'сорок', 'сорока', 'сорока'],
+      50: ['пятьдесят', 'пятидесяти', 'пятидесяти', 'пятьдесят', 'пятьюдесятью', 'пятидесяти'],
+      60: ['шестьдесят', 'шестидесяти', 'шестидесяти', 'шестьдесят', 'шестьюдесятью', 'шестидесяти'],
+      70: ['семьдесят', 'семидесяти', 'семидесяти', 'семьдесят', 'семьюдесятью', 'семидесяти'],
+      80: ['восемьдесят', 'восьмидесяти', 'восьмидесяти', 'восемьдесят', 'восемьюдесятью', 'восьмидесяти'],
+      90: ['девяносто', 'девяноста', 'девяноста', 'девяносто', 'девяноста', 'девяноста'],
+      100: ['сто', 'ста', 'ста', 'сто', 'ста', 'ста'],
+      200: ['двести', 'двухсот', 'двумстам', 'двести', 'двумястами', 'двухстах'],
+      300: ['триста', 'трёхсот', 'трёмстам', 'триста', 'тремястами', 'трёхстах'],
+      400: ['четыреста', 'четырёхсот', 'четырёмстам', 'четыреста', 'четырьмястами', 'четырёхстах'],
+      500: ['пятьсот', 'пятисот', 'пятистам', 'пятьсот', 'пятьюстами', 'пятистах'],
+      600: ['шестьсот', 'шестисот', 'шестистам', 'шестьсот', 'шестьюстами', 'шестистах'],
+      700: ['семьсот', 'семисот', 'семистам', 'семьсот', 'семьюстами', 'семистах'],
+      800: ['восемьсот', 'восьмисот', 'восьмистам', 'восемьсот', 'восьмьюстами', 'восьмистах'],
+      900: ['девятьсот', 'девятисот', 'девятистам', 'девятьсот', 'девятьюстами', 'девятистах']
+    },
+    teen: 'одиннадцат двенадцат тринадцат четырнадцат пятнадцат шестнадцат семнадцат восемнадцат девятнадцат'.split(' '),
+    teenEnd: ['ь', 'и', 'и', 'ь', 'ью', 'и'],
+    tens: { 20: 'двадцат', 30: 'тридцат' },
+    big: [
+      [1e9, 'm', ['миллиард', 'миллиарда', 'миллиарду', 'миллиард', 'миллиардом', 'миллиарде'], ['миллиарды', 'миллиардов', 'миллиардам', 'миллиарды', 'миллиардами', 'миллиардах']],
+      [1e6, 'm', ['миллион', 'миллиона', 'миллиону', 'миллион', 'миллионом', 'миллионе'], ['миллионы', 'миллионов', 'миллионам', 'миллионы', 'миллионами', 'миллионах']],
+      [1e3, 'f', ['тысяча', 'тысячи', 'тысяче', 'тысячу', 'тысячей', 'тысяче'], ['тысячи', 'тысяч', 'тысячам', 'тысячи', 'тысячами', 'тысячах']]
+    ],
+    // ordinal stems; 'o' = stressed «-ой» in the masculine nominative, 's' = «третий»
+    ord: {
+      1: 'перв', 2: 'втор:o', 3: 'трет:s', 4: 'четвёрт', 5: 'пят', 6: 'шест:o', 7: 'седьм:o', 8: 'восьм:o', 9: 'девят', 10: 'десят',
+      11: 'одиннадцат', 12: 'двенадцат', 13: 'тринадцат', 14: 'четырнадцат', 15: 'пятнадцат', 16: 'шестнадцат', 17: 'семнадцат',
+      18: 'восемнадцат', 19: 'девятнадцат', 20: 'двадцат', 30: 'тридцат', 40: 'сороков:o', 50: 'пятидесят', 60: 'шестидесят',
+      70: 'семидесят', 80: 'восьмидесят', 90: 'девяност', 100: 'сот', 200: 'двухсот', 300: 'трёхсот', 400: 'четырёхсот',
+      500: 'пятисот', 600: 'шестисот', 700: 'семисот', 800: 'восьмисот', 900: 'девятисот', 1e3: 'тысячн', 1e6: 'миллионн', 1e9: 'миллиардн'
+    },
+    hard: { m: ['ый', 'ого', 'ому', 'ый', 'ым', 'ом'], f: ['ая', 'ой', 'ой', 'ую', 'ой', 'ой'], n: ['ое', 'ого', 'ому', 'ое', 'ым', 'ом'], p: ['ые', 'ых', 'ым', 'ые', 'ыми', 'ых'] },
+    soft: { m: ['ий', 'ьего', 'ьему', 'ий', 'ьим', 'ьем'], f: ['ья', 'ьей', 'ьей', 'ью', 'ьей', 'ьей'], n: ['ье', 'ьего', 'ьему', 'ье', 'ьим', 'ьем'], p: ['ьи', 'ьих', 'ьим', 'ьи', 'ьими', 'ьих'] },
+    whole: [['целая', 'целой', 'целой', 'целую', 'целой', 'целой'], ['целых', 'целых', 'целым', 'целых', 'целыми', 'целых']],
+    frac: { 1: 'десят', 2: 'сот', 3: 'тысячн' },
+    fracEnd: [['ая', 'ой', 'ой', 'ую', 'ой', 'ой'], ['ых', 'ых', 'ым', 'ых', 'ыми', 'ых']],
+    comma: 'запятая', dot: 'точка', minus: 'минус', plus: 'плюс', number: 'номер', about: 'около', approx: 'примерно', and: 'и',
+    zz: 'ноль-ноль', hours: null
+  },
+  uk: {
+    zero: ['нуль', 'нуля', 'нулю', 'нуль', 'нулем', 'нулі'],
+    one: { m: ['один', 'одного', 'одному', 'один', 'одним', 'одному'], f: ['одна', 'однієї', 'одній', 'одну', 'однією', 'одній'], n: ['одне', 'одного', 'одному', 'одне', 'одним', 'одному'] },
+    two: { m: ['два', 'двох', 'двом', 'два', 'двома', 'двох'], f: ['дві', 'двох', 'двом', 'дві', 'двома', 'двох'] },
+    u: {
+      3: ['три', 'трьох', 'трьом', 'три', 'трьома', 'трьох'], 4: ['чотири', 'чотирьох', 'чотирьом', 'чотири', 'чотирма', 'чотирьох'],
+      5: ["п'ять", "п'яти", "п'яти", "п'ять", "п'ятьма", "п'яти"], 6: ['шість', 'шести', 'шести', 'шість', 'шістьма', 'шести'],
+      7: ['сім', 'семи', 'семи', 'сім', 'сьома', 'семи'], 8: ['вісім', 'восьми', 'восьми', 'вісім', 'вісьма', 'восьми'],
+      9: ["дев'ять", "дев'яти", "дев'яти", "дев'ять", "дев'ятьма", "дев'яти"], 10: ['десять', 'десяти', 'десяти', 'десять', 'десятьма', 'десяти'],
+      40: ['сорок', 'сорока', 'сорока', 'сорок', 'сорока', 'сорока'],
+      50: ["п'ятдесят", "п'ятдесяти", "п'ятдесяти", "п'ятдесят", "п'ятдесятьма", "п'ятдесяти"],
+      60: ['шістдесят', 'шістдесяти', 'шістдесяти', 'шістдесят', 'шістдесятьма', 'шістдесяти'],
+      70: ['сімдесят', 'сімдесяти', 'сімдесяти', 'сімдесят', 'сімдесятьма', 'сімдесяти'],
+      80: ['вісімдесят', 'вісімдесяти', 'вісімдесяти', 'вісімдесят', 'вісімдесятьма', 'вісімдесяти'],
+      90: ["дев'яносто", "дев'яноста", "дев'яноста", "дев'яносто", "дев'яноста", "дев'яноста"],
+      100: ['сто', 'ста', 'ста', 'сто', 'ста', 'ста'],
+      200: ['двісті', 'двохсот', 'двомстам', 'двісті', 'двомастами', 'двохстах'],
+      300: ['триста', 'трьохсот', 'трьомстам', 'триста', 'трьомастами', 'трьохстах'],
+      400: ['чотириста', 'чотирьохсот', 'чотирьомстам', 'чотириста', 'чотирмастами', 'чотирьохстах'],
+      500: ["п'ятсот", "п'ятисот", "п'ятистам", "п'ятсот", "п'ятьмастами", "п'ятистах"],
+      600: ['шістсот', 'шестисот', 'шестистам', 'шістсот', 'шістьмастами', 'шестистах'],
+      700: ['сімсот', 'семисот', 'семистам', 'сімсот', 'сьомастами', 'семистах'],
+      800: ['вісімсот', 'восьмисот', 'восьмистам', 'вісімсот', 'вісьмастами', 'восьмистах'],
+      900: ["дев'ятсот", "дев'ятисот", "дев'ятистам", "дев'ятсот", "дев'ятьмастами", "дев'ятистах"]
+    },
+    teen: "одинадцят дванадцят тринадцят чотирнадцят п'ятнадцят шістнадцят сімнадцят вісімнадцят дев'ятнадцят".split(' '),
+    teenEnd: ['ь', 'и', 'и', 'ь', 'ьма', 'и'],
+    tens: { 20: 'двадцят', 30: 'тридцят' },
+    big: [
+      [1e9, 'm', ['мільярд', 'мільярда', 'мільярду', 'мільярд', 'мільярдом', 'мільярді'], ['мільярди', 'мільярдів', 'мільярдам', 'мільярди', 'мільярдами', 'мільярдах']],
+      [1e6, 'm', ['мільйон', 'мільйона', 'мільйону', 'мільйон', 'мільйоном', 'мільйоні'], ['мільйони', 'мільйонів', 'мільйонам', 'мільйони', 'мільйонами', 'мільйонах']],
+      [1e3, 'f', ['тисяча', 'тисячі', 'тисячі', 'тисячу', 'тисячею', 'тисячі'], ['тисячі', 'тисяч', 'тисячам', 'тисячі', 'тисячами', 'тисячах']]
+    ],
+    ord: {
+      1: 'перш', 2: 'друг', 3: 'трет:s', 4: 'четверт', 5: "п'ят", 6: 'шост', 7: 'сьом', 8: 'восьм', 9: "дев'ят", 10: 'десят',
+      11: 'одинадцят', 12: 'дванадцят', 13: 'тринадцят', 14: 'чотирнадцят', 15: "п'ятнадцят", 16: 'шістнадцят', 17: 'сімнадцят',
+      18: 'вісімнадцят', 19: "дев'ятнадцят", 20: 'двадцят', 30: 'тридцят', 40: 'сороков', 50: "п'ятдесят", 60: 'шістдесят',
+      70: 'сімдесят', 80: 'вісімдесят', 90: "дев'яност", 100: 'сот', 200: 'двохсот', 300: 'трьохсот', 400: 'чотирьохсот',
+      500: "п'ятисот", 600: 'шестисот', 700: 'семисот', 800: 'восьмисот', 900: "дев'ятисот", 1e3: 'тисячн', 1e6: 'мільйонн', 1e9: 'мільярдн'
+    },
+    hard: { m: ['ий', 'ого', 'ому', 'ий', 'им', 'ому'], f: ['а', 'ої', 'ій', 'у', 'ою', 'ій'], n: ['е', 'ого', 'ому', 'е', 'им', 'ому'], p: ['і', 'их', 'им', 'і', 'ими', 'их'] },
+    soft: { m: ['ій', 'ього', 'ьому', 'ій', 'ім', 'ьому'], f: ['я', 'ьої', 'ій', 'ю', 'ьою', 'ій'], n: ['є', 'ього', 'ьому', 'є', 'ім', 'ьому'], p: ['і', 'іх', 'ім', 'і', 'іми', 'іх'] },
+    whole: [['ціла', 'цілої', 'цілій', 'цілу', 'цілою', 'цілій'], ['цілих', 'цілих', 'цілим', 'цілих', 'цілими', 'цілих']],
+    frac: { 1: 'десят', 2: 'сот', 3: 'тисячн' },
+    fracEnd: [['а', 'ої', 'ій', 'у', 'ою', 'ій'], ['их', 'их', 'им', 'их', 'ими', 'их']],
+    comma: 'кома', dot: 'крапка', minus: 'мінус', plus: 'плюс', number: 'номер', about: 'близько', approx: 'приблизно', and: 'і',
+    zz: null
+  }
+};
+
+function unitWords(T, n, c, g) {    // 1..19, tens, hundreds: one word
+  if (n == 1) return T.one[g == 'f' ? 'f' : g == 'n' ? 'n' : 'm'][c];
+  if (n == 2) return T.two[g == 'f' ? 'f' : 'm'][c];
+  if (T.u[n]) return T.u[n][c];
+  if (n > 10 && n < 20) return T.teen[n - 11] + T.teenEnd[c];
+  if (T.tens[n]) return T.tens[n] + T.teenEnd[c];
+  return '';
+}
+function triple(T, k, c, g) {
+  var w = [], h = Math.floor(k / 100) * 100, r = k % 100;
+  if (h) w.push(T.u[h][c]);
+  if (r >= 20 && r % 10) { w.push(unitWords(T, r - r % 10, c, g)); w.push(unitWords(T, r % 10, c, g)); }
+  else if (r) w.push(unitWords(T, r, c, g));
+  return w;
+}
+// form of a counted noun after a number (sg and pl are six-case arrays; lang decides 2-4)
+function agree(lang, n, c, sg, pl) {
+  var l2 = n % 100, l1 = n % 10;
+  if (c == NOM || c == ACC) {
+    if (l2 >= 11 && l2 <= 14) return pl[GEN];
+    if (l1 == 1) return sg[c];
+    if (l1 >= 2 && l1 <= 4) return lang == 'uk' ? pl[c] : sg[GEN];
+    return pl[GEN];
+  }
+  return l1 == 1 && l2 != 11 ? sg[c] : pl[c];
+}
+function cardinal(lang, n, c, g) {
+  var T = L[lang];
+  if (n == 0) return T.zero[c];
+  var w = [];
+  T.big.forEach(function (b) {
+    var k = Math.floor(n / b[0]) % 1000;
+    if (!k) return;
+    if (k != 1 || n >= b[0] * 1000) w = w.concat(triple(T, k, c, b[1]));
+    w.push(agree(lang, k, c, b[2], b[3]));
+  });
+  w = w.concat(triple(T, n % 1000, c, g));
+  return w.join(' ');
+}
+function ordEnd(T, stem, c, g) {
+  var p = stem.split(':'), set = p[1] == 's' ? T.soft : T.hard, e = set[g][c];
+  if (p[1] == 'o' && g == 'm' && (c == NOM || c == ACC)) e = 'ой';
+  return p[0] + e;
+}
+// genitive of a number glued into a compound: 5 -> пяти (пятилетний), 2 -> двух
+function glued(lang, n) {
+  if (n == 1) return lang == 'uk' ? 'одно' : 'одно';
+  if (n == 100) return 'сто';
+  if (n == 90) return lang == 'uk' ? "дев'яносто" : 'девяносто';
+  if (n == 40) return 'сорока';
+  if (lang == 'uk' && n >= 2 && n <= 4) return ['', '', 'дво', 'три', 'чотири'][n];
+  return cardinal(lang, n, GEN, 'm').replace(/ /g, '');
+}
+function ordinal(lang, n, c, g) {      // g: m f n p
+  var T = L[lang];
+  if (n == 0) return lang == 'uk' ? ordEnd(T, 'нульов', c, g) : ordEnd(T, 'нулев:o', c, g);
+  var tail, head;
+  if (n % 100) {
+    var r = n % 100;
+    if (r < 20 || r % 10 == 0) { tail = T.ord[r]; head = n - r; }
+    else { tail = T.ord[r % 10]; head = n - r % 10; }
+  } else if (n % 1000) { tail = T.ord[n % 1000]; head = n - n % 1000; }
+  else {
+    var scale = n % 1e6 ? 1e3 : n % 1e9 ? 1e6 : 1e9, k = Math.floor(n / scale) % 1000;
+    tail = (k == 1 ? '' : glued(lang, k)) + T.ord[scale]; head = n - k * scale;
+  }
+  var w = head ? cardinal(lang, head, NOM, 'm') + ' ' : '';
+  return w + ordEnd(T, tail, c, g);
+}
+function decimal(lang, intPart, frac, c) {
+  var T = L[lang];
+  if (frac.length > 3) return cardinal(lang, intPart, c, 'f') + ' ' + T.comma + ' ' + frac.split('').map(function (d) { return cardinal(lang, +d, NOM, 'm'); }).join(' ');
+  var f = parseInt(frac, 10), w = [cardinal(lang, intPart, c, 'f')];
+  w.push((intPart % 10 == 1 && intPart % 100 != 11) ? T.whole[0][c] : T.whole[1][c]);
+  w.push(cardinal(lang, f, c, 'f'));
+  var fe = (f % 10 == 1 && f % 100 != 11) ? T.fracEnd[0][c] : T.fracEnd[1][c];
+  w.push(T.frac[frac.length] + fe);
+  return w.join(' ');
+}
+function digits(lang, s) { return s.split('').map(function (d) { return cardinal(lang, +d, NOM, 'm'); }).join(' '); }
+
+// ---------------------------------------------------------------- what surrounds a number
+
+function caseSet(list) { var o = {}; list.split(' ').forEach(function (w) { o[w] = 1; }); return o; }
+var PREP_CASE = {
+  ru: [
+    [GEN, caseSet('без для до из изо от ото у около после кроме вместо возле среди против свыше более менее больше меньше порядка вокруг мимо ради накануне внутри вне сверх из-за из-под с начала')],
+    [DAT, caseSet('к ко благодаря согласно вопреки навстречу')],
+    [ACC, caseSet('в во на за про через сквозь')],
+    [INS, caseSet('над под перед между')],
+    [PREP, caseSet('о об обо при')]
+  ],
+  uk: [
+    [GEN, caseSet('без для до з із зі від біля після крім замість близько понад серед протягом щодо навколо поблизу проти більше менше')],
+    [DAT, caseSet('завдяки згідно назустріч всупереч')],
+    [ACC, caseSet('в у на за про через крізь')],
+    [INS, caseSet('над під перед між поза')],
+    [PREP, caseSet('о об при')]
+  ]
+};
+function prepCase(lang, w, rest) {
+  if (!w) return null;
+  if (lang == 'ru' && (w == 'с' || w == 'со')) return /(^|\s)(до|по)\s/.test(rest) ? GEN : INS;
+  if (lang == 'ru' && w == 'по') return 'po';
+  var t = PREP_CASE[lang];
+  for (var i = 0; i < t.length; i++) if (t[i][1][w]) return t[i][0];
+  return null;
+}
+var MONTHS = {
+  ru: caseSet('января февраля марта апреля мая июня июля августа сентября октября ноября декабря'),
+  uk: caseSet('січня лютого березня квітня травня червня липня серпня вересня жовтня листопада грудня')
+};
+var MONTH_ANY = { ru: /^(январ|феврал|март|апрел|ма[йяюе]|июн|июл|август|сентябр|октябр|ноябр|декабр)/, uk: /^(січ|лют|берез|квіт|трав|черв|лип|серп|верес|жовт|листопад|груд)/ };
+// year and century nouns: word -> [case or -1 = take from the preposition, plural]
+var YEAR = {
+  ru: { 'год': [NOM, 0], 'года': [GEN, 0], 'году': [-2, 0], 'годом': [INS, 0], 'г': [-1, 0], 'годы': [NOM, 1], 'годов': [GEN, 1], 'годам': [DAT, 1], 'годами': [INS, 1], 'годах': [PREP, 1], 'гг': [-1, 1] },
+  uk: { 'рік': [NOM, 0], 'року': [GEN, 0], 'році': [PREP, 0], 'роком': [INS, 0], 'р': [-1, 0], 'роки': [NOM, 1], 'років': [GEN, 1], 'рокам': [DAT, 1], 'роками': [INS, 1], 'роках': [PREP, 1], 'рр': [-1, 1] }
+};
+var YEAR_FORMS = {
+  ru: [['год', 'года', 'году', 'год', 'годом', 'году'], ['годы', 'годов', 'годам', 'годы', 'годами', 'годах']],
+  uk: [['рік', 'року', 'року', 'рік', 'роком', 'році'], ['роки', 'років', 'рокам', 'роки', 'роками', 'роках']]
+};
+var CENT = {
+  ru: { 'век': [NOM, 0], 'века': [GEN, 0], 'веку': [DAT, 0], 'веке': [PREP, 0], 'веком': [INS, 0], 'в': [-1, 0], 'веков': [GEN, 1], 'веках': [PREP, 1], 'векам': [DAT, 1], 'вв': [-1, 1] },
+  uk: { 'століття': [-1, 0], 'столітті': [PREP, 0], 'століттю': [DAT, 0], 'століттям': [INS, 0], 'ст': [-1, 0], 'сторіччя': [-1, 0], 'сторіччі': [PREP, 0] }
+};
+var CENT_FORMS = {
+  ru: [['век', 'века', 'веку', 'век', 'веком', 'веке'], ['века', 'веков', 'векам', 'века', 'веками', 'веках']],
+  uk: [['століття', 'століття', 'століттю', 'століття', 'століттям', 'столітті'], ['століття', 'століть', 'століттям', 'століття', 'століттями', 'століттях']]
+};
+
+// what decides the case of ИИ / ШІ (abbrCase in normalizeSlav); lists, not a parser: NLTagger's
+// Russian parts of speech were tried 2026-11-10 and called «идёт» a noun
+var AIRULES = {
+  ru: {
+    adj: /^[\p{L}]{2,}(ого|его|ому|ему|ыми|ими|ым|им|ый|ий|ой|ая|яя|ую|юю|ое|ее|ые|ие|ых|их)$/u,
+    adjEnd: [[/(ого|его)$/, GEN], [/(ому|ему)$/, DAT], [/(ыми|ими|ым|им)$/, INS]],
+    verb: /(л|ла|ло|ли|ть|ти|чь|ет|ёт|ит|ют|ят|ут|ат|ся|сь|ешь|ишь|ете|ите)$/,
+    negAfter: /^(не было|нет|не будет|не существует|не существовало|не стало|не хватает|не хватало|не появилось)(\s|$)/,
+    negBefore: /(^|\s)(нет|не было|не будет|не стало|не хватает|не хватало|не существует|не существовало)$/,
+    gov: [
+      [/^(пользу|воспольз|пользова|занима|увлека|увлеч|интересу|восхища|злоупотребля|владе|создан|написан|сгенерирован|сделан|нарисован|придуман|переведен|переведён|заменён|заменен)/, INS],
+      [/^(доверя|довери|помога|помоч|помог|поруча|поручи|уступа|уступи|проигрыва|проигра|подчиня|подчини|противопостав)/, DAT],
+      [/^(боя|боит|бои|опаса|избега|достиг|лишен|лишён|лиша)/, GEN]
+    ],
+    noun: /^(развити|использовани|возможност|модел|эпох|эр[аеуы]$|рол[ьи]$|влияни|рын[ко]|компани|технологи|систем|агент|ассистент|помощ|разработ|внедрени|регулировани|этик|безопасност|век[аеу]?$|будущ|истори|прорыв|гонк|уровн|уровень|приход|появлени|применени|способност|ошибк|качеств|мощност|обучени|инструмент|сервис|продукт|сфер|област|исследовани|лаборатори|специалист|эксперт|страх|угроз|опасност|риск|власт|мнени|генераци|проблем|отрасл|индустри|пузыр|революци|эволюци|поддержк|функци|потенциал|принцип|основ|алгоритм|ответ[аыу]?$|текст[аыу]?$)/,
+    when: /^(веке|веку|веках|году|годах|время|времена|итоге|будущем|прошлом|конце|начале|результате)$/
+  },
+  uk: {
+    adj: /^[\p{L}]{2,}(ого|ього|ому|ьому|ими|іми|им|ім|ий|ій|ою|ьою|их|іх)$/u,
+    adjEnd: [[/(ого|ього)$/, GEN], [/(ому|ьому)$/, DAT], [/(ими|іми|им|ім)$/, INS]],
+    verb: /(в|ла|ло|ли|ти|ть|є|ить|ять|ють|уть|ся|сь|еш|иш|ете|ите)$/,
+    negAfter: /^(не було|немає|нема|не буде|не існує|не існувало|не стало|бракує|бракувало|не з'явилося|не зʼявилося)(\s|$)/,
+    negBefore: /(^|\s)(немає|нема|не було|не буде|не стало|бракує|бракувало|не існує|не існувало)$/,
+    gov: [
+      [/^(користу|скориста|займа|захоплю|цікав|створен|написан|згенерован|зроблен|намальован|вигадан|перекладен|замінен)/, INS],
+      [/^(довіря|довіри|допомага|допомог|доруча|доручи|поступа|поступи|програва|програ|підпорядкову|протиставл)/, DAT],
+      [/^(бої|боя|боїть|остерігає|уника|досяг|позбав)/, GEN]
+    ],
+    noun: /^(розвит|використан|можливост|модел|епох|ер[аиіу]$|рол[ьі]$|вплив|ринк|ринок|компані|технологі|систем|агент|асистент|допомог|розробк|розробни|впровадженн|регулюванн|етик|безпек|століт|майбутн|істор|прорив|перегон|рів[ен]|приход|появ|застосуванн|здатн|помилк|якіст|потужн|навчанн|інструмент|сервіс|продукт|сфер|галуз|дослідженн|лабораторі|фахів|експерт|страх|загроз|небезпек|ризик|влад|думк|генераці|проблем|індустрі|бульбашк|революці|еволюці|підтримк|функці|потенціал|принцип|основ|алгоритм|відповід|текст)/,
+    when: /^(столітті|сторіччі|році|роках|час|часи|підсумку|майбутньому|минулому|кінці|початку|результаті)$/
+  }
+};
+
+// units after (or currency before) a number: gender, singular and plural forms
+function m6(s, a) { return a.map(function (e) { return s + e; }); }
+function mk(lang, s, kindOf) {
+  if (lang == 'ru') {
+    if (kindOf == 'byte') return ['m', m6(s, ['', 'а', 'у', '', 'ом', 'е']), m6(s, ['ы', '', 'ам', 'ы', 'ами', 'ах'])];
+    if (kindOf == 'fa') return ['f', m6(s, ['а', 'ы', 'е', 'у', 'ой', 'е']), m6(s, ['ы', '', 'ам', 'ы', 'ами', 'ах'])];
+    return ['m', m6(s, ['', 'а', 'у', '', 'ом', 'е']), m6(s, ['ы', 'ов', 'ам', 'ы', 'ами', 'ах'])];
+  }
+  if (kindOf == 'fa') return ['f', m6(s, ['а', 'и', 'і', 'у', 'ою', 'і']), m6(s, ['и', '', 'ам', 'и', 'ами', 'ах'])];
+  return ['m', m6(s, ['', 'а', 'у', '', 'ом', 'і']), m6(s, ['и', 'ів', 'ам', 'и', 'ами', 'ах'])];
+}
+var FIXED = function (w, g) { return [g, [w, w, w, w, w, w], [w, w, w, w, w, w]]; };
+var UNITS = {
+  ru: (function () {
+    var rub = ['m', ['рубль', 'рубля', 'рублю', 'рубль', 'рублём', 'рубле'], ['рубли', 'рублей', 'рублям', 'рубли', 'рублями', 'рублях']],
+      usd = mk('ru', 'доллар'), eur = FIXED('евро', 'n'), gbp = mk('ru', 'фунт'),
+      uah = ['f', ['гривна', 'гривны', 'гривне', 'гривну', 'гривной', 'гривне'], ['гривны', 'гривен', 'гривнам', 'гривны', 'гривнами', 'гривнах']],
+      kop = ['f', ['копейка', 'копейки', 'копейке', 'копейку', 'копейкой', 'копейке'], ['копейки', 'копеек', 'копейкам', 'копейки', 'копейками', 'копейках']],
+      pct = mk('ru', 'процент'), deg = mk('ru', 'градус'),
+      gb = mk('ru', 'гигабайт', 'byte'), mb = mk('ru', 'мегабайт', 'byte'), kb = mk('ru', 'килобайт', 'byte'), tb = mk('ru', 'терабайт', 'byte'),
+      ghz = mk('ru', 'гигагерц', 'byte'),
+      hour = ['m', ['час', 'часа', 'часу', 'час', 'часом', 'часе'], ['часы', 'часов', 'часам', 'часы', 'часами', 'часах']],
+      pcs = ['f', ['штука', 'штуки', 'штуке', 'штуку', 'штукой', 'штуке'], ['штуки', 'штук', 'штукам', 'штуки', 'штуками', 'штуках']];
+    var b = L.ru.big;
+    return {
+      '₽': rub, 'руб': rub, 'RUB': rub, '$': usd, 'долл': usd, 'USD': usd, '€': eur, 'EUR': eur, '£': gbp, '₴': uah, 'грн': uah, 'UAH': uah,
+      'коп': kop, '%': pct, '°': deg, 'ГБ': gb, 'Гб': gb, 'GB': gb, 'МБ': mb, 'Мб': mb, 'MB': mb, 'КБ': kb, 'Кб': kb, 'KB': kb,
+      'ТБ': tb, 'Тб': tb, 'TB': tb, 'ГГц': ghz, 'GHz': ghz, 'км': mk('ru', 'километр'), 'м': mk('ru', 'метр'), 'см': mk('ru', 'сантиметр'),
+      'мм': mk('ru', 'миллиметр'), 'кг': mk('ru', 'килограмм'), 'г': mk('ru', 'грамм'), 'л': mk('ru', 'литр'), 'мл': mk('ru', 'миллилитр'),
+      'ч': hour, 'мин': mk('ru', 'минут', 'fa'), 'сек': mk('ru', 'секунд', 'fa'), 'шт': pcs,
+      'тыс': [b[2][1], b[2][2], b[2][3]], 'млн': [b[1][1], b[1][2], b[1][3]], 'млрд': [b[0][1], b[0][2], b[0][3]]
+    };
+  })(),
+  uk: (function () {
+    var rub = ['m', ['рубль', 'рубля', 'рублю', 'рубль', 'рублем', 'рублі'], ['рублі', 'рублів', 'рублям', 'рублі', 'рублями', 'рублях']],
+      usd = mk('uk', 'долар'), eur = FIXED('євро', 'n'), gbp = mk('uk', 'фунт'),
+      uah = ['f', ['гривня', 'гривні', 'гривні', 'гривню', 'гривнею', 'гривні'], ['гривні', 'гривень', 'гривням', 'гривні', 'гривнями', 'гривнях']],
+      kop = ['f', ['копійка', 'копійки', 'копійці', 'копійку', 'копійкою', 'копійці'], ['копійки', 'копійок', 'копійкам', 'копійки', 'копійками', 'копійках']],
+      pct = ['m', ['відсоток', 'відсотка', 'відсотку', 'відсоток', 'відсотком', 'відсотку'], ['відсотки', 'відсотків', 'відсоткам', 'відсотки', 'відсотками', 'відсотках']],
+      deg = mk('uk', 'градус'), gb = mk('uk', 'гігабайт'), mb = mk('uk', 'мегабайт'), kb = mk('uk', 'кілобайт'), tb = mk('uk', 'терабайт'),
+      ghz = mk('uk', 'гігагерц'),
+      hour = ['f', ['година', 'години', 'годині', 'годину', 'годиною', 'годині'], ['години', 'годин', 'годинам', 'години', 'годинами', 'годинах']],
+      pcs = ['f', ['штука', 'штуки', 'штуці', 'штуку', 'штукою', 'штуці'], ['штуки', 'штук', 'штукам', 'штуки', 'штуками', 'штуках']];
+    var b = L.uk.big;
+    return {
+      '₽': rub, 'руб': rub, 'RUB': rub, '$': usd, 'дол': usd, 'USD': usd, '€': eur, 'EUR': eur, '£': gbp, '₴': uah, 'грн': uah, 'UAH': uah,
+      'коп': kop, '%': pct, '°': deg, 'ГБ': gb, 'Гб': gb, 'GB': gb, 'МБ': mb, 'Мб': mb, 'MB': mb, 'КБ': kb, 'Кб': kb, 'KB': kb,
+      'ТБ': tb, 'Тб': tb, 'TB': tb, 'ГГц': ghz, 'GHz': ghz, 'км': mk('uk', 'кілометр'), 'м': mk('uk', 'метр'), 'см': mk('uk', 'сантиметр'),
+      'мм': mk('uk', 'міліметр'), 'кг': mk('uk', 'кілограм'), 'г': mk('uk', 'грам'), 'л': mk('uk', 'літр'), 'мл': mk('uk', 'мілілітр'),
+      'год': hour, 'хв': mk('uk', 'хвилин', 'fa'), 'сек': mk('uk', 'секунд', 'fa'), 'шт': pcs,
+      'тис': [b[2][1], b[2][2], b[2][3]], 'млн': [b[1][1], b[1][2], b[1][3]], 'млрд': [b[0][1], b[0][2], b[0][3]]
+    };
+  })()
+};
+var MULT = { ru: caseSet('тыс млн млрд'), uk: caseSet('тис млн млрд') };
+var CELSIUS = { ru: 'Цельсия', uk: 'за Цельсієм' };
+
+// gender of the noun after a number, guessed from its ending (matters for 1 and 2 only)
+var UK_FEM_PL = caseSet('гривні години хвилини секунди тисячі копійки черги людини сторінки книги неділі доби хвилі ночі зміни особи штуки частини статті групи команди країни мови кімнати речі дитини дівчини жінки родини');
+function guessGender(lang, word, n, c) {
+  if (!word) return 'm';
+  word = word.toLowerCase();
+  var l1 = n % 10;
+  if (lang == 'ru') {
+    if (l1 == 2) return /[ыи]$/.test(word) ? 'f' : 'm';
+    if (c == NOM || c == ACC) return /[аяую]$/.test(word) ? 'f' : /[оеё]$/.test(word) ? 'n' : 'm';
+    if (c == GEN) return /[ыи]$/.test(word) ? 'f' : 'm';
+    if (c == DAT) return /[еи]$/.test(word) ? 'f' : 'm';
+    if (c == INS) return /(ой|ей|ою|ею|ью)$/.test(word) ? 'f' : 'm';
+    return 'm';
+  }
+  if (l1 == 2) return UK_FEM_PL[word] || /ії$/.test(word) ? 'f' : 'm';
+  if (c == NOM || c == ACC) return /(нн|тт|лл|сс|чч|жж|цц|дд|зз)я$/.test(word) ? 'n' : /[аяую]$/.test(word) ? 'f' : /[еоє]$/.test(word) ? 'n' : 'm';
+  if (c == GEN) return /(ої|ії|еї|ки|ни|ти|ди|ри)$/.test(word) && !/(нн|тт)я$/.test(word) ? 'f' : 'm';
+  if (c == INS) return /(ою|ею|єю)$/.test(word) ? 'f' : 'm';
+  return 'm';
+}
+
+// ---------------------------------------------------------------- the normaliser
+
+var ROMAN = /^(M{0,3})(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/;
+function roman(s) {
+  if (!s || !ROMAN.test(s)) return 0;
+  var v = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 }, n = 0;
+  for (var i = 0; i < s.length; i++) { var a = v[s[i]], b = v[s[i + 1]] || 0; n += a < b ? -a : a; }
+  return n;
+}
+var LATIN = /^[A-Za-z]/;
+
+function tokenize(s) {
+  return s.match(/\d+|[\p{L}\p{M}]+(?:['’ʼ][\p{L}\p{M}]+)*|[ \t]+|[\s\S]/gu) || [];
+}
+
+// «1-й»: «1-й день» is masculine nominative, «в 1-й главе», «1-й главы» feminine oblique;
+// the noun's ending tells (a masculine noun in the nominative ends in a consonant, й or ь)
+function femOrMasc(pc, nextW) {
+  if (nextW && !/[бвгджзйклмнпрстфхцчшщь]$/.test(nextW)) return ['f', pc == ACC || pc == 'po' ? PREP : pc == null ? GEN : pc];
+  if (!nextW && pc != null && pc != ACC && pc != 'po') return ['f', pc];
+  return ['m', NOM];
+}
+// ordinal suffix -> [gender, case] (case -1 = from the preposition)
+function suffixForm(lang, suf, n, pc, nextW) {
+  var s = suf.toLowerCase();
+  var oblique = pc != null && pc != ACC && pc != 'po';
+  if (lang == 'ru') {
+    if (/^(й|ой|ий|ый)$/.test(s)) return femOrMasc(pc, nextW);
+    if (/^(я|ая)$/.test(s)) return ['f', NOM];
+    if (/^(ю|ую)$/.test(s)) return ['f', ACC];
+    if (/^(е|ое|ые|ие)$/.test(s)) return (s == 'е' && n % 10 == 0 && n >= 10) || s == 'ые' || s == 'ие' || (nextW && /^год/.test(nextW)) ? ['p', NOM] : ['n', NOM];
+    if (/^(го|ого|его)$/.test(s)) return ['m', GEN];
+    if (/^(му|ому|ему)$/.test(s)) return ['m', DAT];
+    if (s == 'м') {
+      if (nextW && /(ам|ям)$/.test(nextW)) return ['p', DAT];
+      return pc == ACC || pc == PREP ? ['m', PREP] : ['m', INS];
+    }
+    if (/^(ым|им)$/.test(s)) return ['m', INS];
+    if (/^(ом|ем)$/.test(s)) return ['m', PREP];
+    if (/^(х|ых|их)$/.test(s)) return ['p', pc == PREP || pc == ACC ? PREP : GEN];
+    if (/^(ми|ыми)$/.test(s)) return ['p', INS];
+    return null;
+  }
+  if (/^(й|ий)$/.test(s)) return femOrMasc(pc, nextW);
+  if (/^(а|я)$/.test(s)) return ['f', NOM];
+  if (/^(у|ю)$/.test(s)) return ['f', ACC];
+  if (/^(е|є)$/.test(s)) return n % 10 == 0 && n >= 10 ? ['p', NOM] : ['n', NOM];
+  if (/^(ті|і)$/.test(s)) return ['p', NOM];
+  if (/^(го|ого)$/.test(s)) return ['m', GEN];
+  if (/^(му|ому)$/.test(s)) return pc == ACC || pc == PREP ? ['m', PREP] : ['m', DAT];
+  if (/^(м|им)$/.test(s)) return ['m', INS];
+  if (/^(ої)$/.test(s)) return ['f', GEN];
+  if (/^(ій)$/.test(s)) return ['f', pc == null ? PREP : pc];
+  if (/^(ою)$/.test(s)) return ['f', INS];
+  if (/^(х|их)$/.test(s)) return ['p', pc == PREP || pc == ACC ? PREP : GEN];
+  if (/^(ми|ими)$/.test(s)) return ['p', INS];
+  return null;
+}
+
+function normalizeSlav(par, lang) {
+  var T = L[lang], U = UNITS[lang];
+  var t = tokenize(par), o = [], i = 0;
+  var isSp = function (k) { return t[k] !== undefined && /^[ \t]+$/.test(t[k]); };
+  var isNum = function (k) { return t[k] !== undefined && /^\d+$/.test(t[k]); };
+  var isWord = function (k) { return t[k] !== undefined && /^[\p{L}\p{M}]/u.test(t[k]); };
+  var skipSp = function (k) { while (isSp(k)) k++; return k; };
+  // the word before position k, through spaces, quotes and brackets only
+  var prevWord = function (k) {
+    k--;
+    while (k >= 0 && (isSp(k) || /^[«"„“(]$/.test(t[k]))) k--;
+    return k >= 0 && isWord(k) ? t[k].toLowerCase() : null;
+  };
+  var restAfter = function (k) { return ' ' + t.slice(k, k + 14).join('').toLowerCase() + ' '; };
+  // the noun right after position k (a word, maybe after one space); returns [index, word] or null
+  var nextWordAt = function (k) { var j = skipSp(k); return isWord(j) ? [j, t[j]] : null; };
+  // a dot after an abbreviation: dropped, unless it ends the sentence
+  var eatDot = function (j) {
+    if (t[j] !== '.') return [j, ''];
+    var k = skipSp(j + 1);
+    if (k >= t.length || (t[k] && /^[\p{Lu}«"]/u.test(t[k]))) return [j + 1, '.'];
+    return [j + 1, ''];
+  };
+  var emit = function (s) { o.push(s); };
+  // words around position k inside the sentence: back (nearest first) and ahead, lower case
+  var wordsBack = function (k, n) {
+    var r = [];
+    for (k--; k >= 0 && r.length < n; k--) { if (/^[.!?…:;]$/.test(t[k])) break; if (isWord(k)) r.push(t[k].toLowerCase()); }
+    return r;
+  };
+  var wordsAhead = function (k, n) {
+    var r = [];
+    for (k++; k < t.length && r.length < n; k++) { if (/^[.!?…:;,]$/.test(t[k])) break; if (isWord(k)) r.push(t[k].toLowerCase()); }
+    return r;
+  };
+  // the case an indeclinable abbreviation read as a noun phrase needs (ИИ -> искусственного
+  // интеллекта). 2026-11-10: «в XX веке ИИ не было» was read «искусственный интеллект не было».
+  // Rules, nearest first: a preposition before (through adjectives), the ending of an adjective
+  // before, «нет / не было» around, a verb that governs a case, a noun before (genitive); else the
+  // nominative, which is also right for a direct object.
+  var abbrCase = function (k) {
+    var B = wordsBack(k, 4), A = wordsAhead(k, 2), R = AIRULES[lang];
+    var b = 0;
+    while (b < B.length && R.adj.test(B[b]) && !R.verb.test(B[b])) b++;        // adjectives before
+    if (b < B.length) {
+      var pc = prepCase(lang, B[b], restAfter(k));
+      if (pc != null) return pc == 'po' ? DAT : pc;
+    }
+    if (B.length && b > 0) {                                                   // «генеративного ИИ»
+      var a0 = B[0];
+      for (var e = 0; e < R.adjEnd.length; e++) if (R.adjEnd[e][0].test(a0)) return R.adjEnd[e][1];
+    }
+    var ah = A.join(' ');
+    if (R.negAfter.test(ah) || (B.length && R.negBefore.test(B.slice(0, 2).reverse().join(' ')))) return GEN;
+    if (B.length) {
+      var w = B[0];
+      for (var v = 0; v < R.gov.length; v++) if (R.gov[v][0].test(w)) return R.gov[v][1];
+      // «в XXI веке ИИ изменил всё»: after a time phrase a verb makes the abbreviation the subject
+      if (R.when.test(w) && A.length && R.verb.test(A[0])) return NOM;
+      if (R.noun.test(w)) return GEN;
+    }
+    return NOM;
+  };
+
+  while (i < t.length) {
+    var tok = t[i];
+
+    // ИИ / ШІ, Siri reads «ИИ» as Roman two
+    if ((lang == 'ru' && tok == 'ИИ') || (lang == 'uk' && tok == 'ШІ')) {
+      var AI = lang == 'ru' ? ['искусственный интеллект', 'искусственного интеллекта', 'искусственному интеллекту', 'искусственный интеллект', 'искусственным интеллектом', 'искусственном интеллекте']
+        : ['штучний інтелект', 'штучного інтелекту', 'штучному інтелекту', 'штучний інтелект', 'штучним інтелектом', 'штучному інтелекті'];
+      if (t[i + 1] == '-' && isWord(i + 2)) { emit(lang == 'ru' ? 'и-и ' : 'ші '); i += 2; continue; }
+      emit(AI[abbrCase(i)]); i++; continue;
+    }
+    // KYC-верификация: a Latin abbreviation glued to a Cyrillic word by a hyphen is read apart
+    if (isWord(i) && /^[A-Z]{2,}$/.test(tok) && t[i + 1] == '-' && isWord(i + 2) && /^[Ѐ-ӿ]/.test(t[i + 2])) {
+      emit(tok + ' '); i += 2; continue;
+    }
+    // Roman numerals before a century noun
+    if (isWord(i) && ROMAN.test(tok) && /^[IVXLC]+$/.test(tok)) {
+      var chain = [[i, roman(tok)]], j = i + 1;
+      while (true) {     // XIX–XX, XIX и XX
+        var k = skipSp(j);
+        if (/^[-–—]$/.test(t[k] || '') || (t[k] || '').toLowerCase() == T.and) {
+          var k2 = skipSp(k + 1);
+          if (isWord(k2) && /^[IVXLC]+$/.test(t[k2]) && ROMAN.test(t[k2])) { chain.push([k2, roman(t[k2]), t[k]]); j = k2 + 1; continue; }
+        }
+        break;
+      }
+      var nw = nextWordAt(j), cent = nw && CENT[lang][nw[1].toLowerCase()];
+      if (cent) {
+        var pc = prepCase(lang, prevWord(i), restAfter(i)); if (pc == 'po') pc = DAT;
+        var cc = cent[0] >= 0 ? cent[0] : (pc == ACC ? PREP : pc == null ? (lang == 'uk' ? GEN : GEN) : pc);
+        if (cent[0] < 0 && nw[1].toLowerCase() == 'в' && t[nw[0] + 1] !== '.') { cent = null; }
+        if (cent) {
+          var words = chain.map(function (x) { return ordinal(lang, x[1], cc, 'm'); });
+          emit(words.join(chain.length > 1 && /^[-–—]$/.test(chain[1][2]) ? ' — ' : ' ' + T.and + ' '));
+          var after = nw[0] + 1, noun = t[nw[0]];
+          if (cent[0] < 0) {         // the abbreviation в. вв. ст. becomes the word
+            var pl = cent[1] || chain.length > 1;
+            noun = CENT_FORMS[lang][pl ? 1 : 0][cc];
+            var d = eatDot(after); after = d[0]; noun += d[1];
+          }
+          emit(' ' + noun); i = after; continue;
+        }
+      }
+    }
+
+    // signs before a number
+    if (/^[~≈№#+−]$/.test(tok) || (tok == '-' && (i == 0 || isSp(i - 1)) && isNum(i + 1) && !isNum(i - 2))) {
+      var k3 = skipSp(i + 1);
+      if (isNum(k3) || (/^[$€£₴₽]$/.test(t[k3] || '') && isNum(skipSp(k3 + 1)))) {
+        var pre = { '~': T.about, '≈': T.approx, '№': T.number, '#': T.number, '+': T.plus, '−': T.minus, '-': T.minus }[tok];
+        if (tok != '#' || isNum(i + 1)) { emit(pre + ' '); i = k3; if (tok == '~') t.__forceGen = k3; continue; }
+      }
+    }
+
+    // a currency sign before the number: $20, € 5
+    var preUnit = null;
+    if (/^[$€£₴₽]$/.test(tok) && isNum(skipSp(i + 1))) { preUnit = U[tok]; i = skipSp(i + 1); tok = t[i]; }
+
+    if (!isNum(i)) { emit(tok); i++; continue; }
+
+    // ---- a number starts at i
+    var start = i, forceGen = t.__forceGen === i;
+    // glued to Latin letters (M3, MP3, GPT-4, 5G, iOS17): leave as written
+    if ((i > 0 && isWord(i - 1) && LATIN.test(t[i - 1])) || (isWord(i + 1) && LATIN.test(t[i + 1])) ||
+      (t[i - 1] == '-' && isWord(i - 2) && LATIN.test(t[i - 2]))) { emit(tok); i++; continue; }
+
+    // groups of three digits separated by single spaces: 11 006, 24 500, 1 000 000
+    var str = tok, j2 = i + 1;
+    if (tok.length <= 3) {
+      var g = [], q = i + 1;
+      while (t[q] !== undefined && /^[     ]$/.test(t[q]) && isNum(q + 1)) { g.push(t[q + 1]); q += 2; }
+      if (g.length && g.every(function (x) { return x.length == 3; })) { str = tok + g.join(''); j2 = q; }
+    }
+    var n = parseInt(str, 10);
+    var pcRaw = prepCase(lang, prevWord(start), restAfter(start));
+    var pc = forceGen ? GEN : pcRaw;
+    var c0 = pc == 'po' ? (n % 10 == 1 && n % 100 != 11 ? DAT : NOM) : (pc == null ? NOM : pc);
+
+    // leading zero (007, 0800 but not 0): digit by digit, unless it is a time or date
+    // dd.mm.yyyy
+    if (t[j2] == '.' && isNum(j2 + 1) && t[j2 + 2] == '.' && isNum(j2 + 3) && str.length <= 2 && t[j2 + 1].length <= 2 && (t[j2 + 3].length == 4 || t[j2 + 3].length == 2)) {
+      var dd = n, mm = parseInt(t[j2 + 1], 10), yy = parseInt(t[j2 + 3], 10);
+      if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) {
+        if (yy < 100) yy += 2000;
+        var mons = Object.keys(MONTHS[lang]);
+        emit(ordinal(lang, dd, pc == null || pc == 'po' ? (lang == 'uk' ? GEN : GEN) : (pc == ACC ? NOM : pc), 'n') + ' ' + mons[mm - 1] + ' ' + ordinal(lang, yy, GEN, 'm') + ' ' + YEAR_FORMS[lang][0][GEN]);
+        i = j2 + 4; continue;
+      }
+    }
+    // time hh:mm
+    if (t[j2] == ':' && isNum(j2 + 1) && t[j2 + 1].length == 2 && str.length <= 2 && n <= 24 && parseInt(t[j2 + 1], 10) < 60) {
+      var mnt = parseInt(t[j2 + 1], 10), w2;
+      if (lang == 'ru') {
+        w2 = cardinal('ru', n, c0, 'm');
+        if (mnt == 0) { if (pc == null || pc == ACC) w2 += ' ' + T.zz; }
+        else w2 += ' ' + (mnt < 10 ? 'ноль ' + cardinal('ru', mnt, c0, 'f') : cardinal('ru', mnt, c0, 'f'));
+      } else {
+        var hc = pc == PREP ? PREP : pc == ACC ? ACC : (pc == null ? NOM : pc == 'po' ? NOM : pc);
+        if (prevWord(start) == 'о' || prevWord(start) == 'об') hc = PREP;
+        w2 = ordinal('uk', n, hc, 'f');
+        if (mnt) w2 += ' ' + (mnt < 10 ? 'нуль ' + cardinal('uk', mnt, NOM, 'f') : cardinal('uk', mnt, NOM, 'f'));
+      }
+      emit(w2); i = j2 + 2; continue;
+    }
+    // decimal 41,85 or a dotted number 5.5 / 1.3.1
+    var frac = null, dotted = null;
+    if ((t[j2] == ',' || t[j2] == '.') && isNum(j2 + 1) && str.length == tok.length) {
+      if (t[j2] == '.' && t[j2 + 2] == '.' && isNum(j2 + 3)) {     // 1.3.1
+        dotted = [str]; var q2 = j2;
+        while (t[q2] == '.' && isNum(q2 + 1)) { dotted.push(t[q2 + 1]); q2 += 2; }
+        j2 = q2;
+      } else {
+        var after2 = nextWordAt(j2 + 2), sym = t[skipSp(j2 + 2)];
+        var isMoney = sym && (U[sym] || (after2 && U[after2[1]]));
+        if (t[j2] == ',' || isMoney) { frac = t[j2 + 1]; j2 += 2; }
+        else { dotted = [str, t[j2 + 1]]; j2 += 2; }
+      }
+    }
+    if (dotted) { emit(dotted.map(function (x) { return x.length > 1 && x[0] == '0' ? digits(lang, x) : cardinal(lang, parseInt(x, 10), NOM, 'm'); }).join(' ' + T.dot + ' ')); i = j2; continue; }
+
+    // a simple fraction: 1/2, 3/4 (denominator 2-10)
+    if (!frac && t[j2] == '/' && isNum(j2 + 1) && str.length <= 2 && +t[j2 + 1] >= 2 && +t[j2 + 1] <= 10 && n < +t[j2 + 1]) {
+      var den = +t[j2 + 1];
+      emit(cardinal(lang, n, NOM, 'f') + ' ' + ordinal(lang, den, n % 10 == 1 && n % 100 != 11 ? NOM : GEN, n % 10 == 1 && n % 100 != 11 ? 'f' : 'p'));
+      i = j2 + 2; continue;
+    }
+    // a range: 2–3, 1990-1995, 2 – 3
+    var range = null, k4 = j2;
+    if (!frac) {
+      // «2–3», «2-3», «2 – 3»; a spaced em dash is a sentence dash: «11 006 — 16 сентября»
+      var ka = /^[-–—]$/.test(t[k4] || '') ? k4 : (isSp(k4) && /^[–-]$/.test(t[k4 + 1] || '') && isSp(k4 + 2) ? k4 + 1 : -1);
+      if (ka >= 0) {
+        var kb = skipSp(ka + 1);
+        if (isNum(kb) && !(t[kb + 1] == '.' && isNum(kb + 2) && t[kb + 3] == '.')) { range = [n, parseInt(t[kb], 10)]; j2 = kb + 1; }
+      }
+    }
+
+    // an ordinal suffix or a compound: 1-м, 2-му, 90-х, XXI, 5-летний, 3-комнатная
+    if (!frac && !range && /^[-–]$/.test(t[j2] || '') && isWord(j2 + 1) && /^[Ѐ-ӿ]/.test(t[j2 + 1])) {
+      var suf = t[j2 + 1], nxt = nextWordAt(j2 + 2), nextW = nxt ? nxt[1].toLowerCase() : null;
+      if (suf.length > 3 && suf == suf.toLowerCase() && !/^(ти|х|ми)$/.test(suf)) { emit(glued(lang, n) + suf); i = j2 + 2; continue; }
+      if (lang == 'ru' && (suf == 'ти' || (suf == 'х' && n < 10) || (suf == 'ми' && n < 10))) {
+        emit(cardinal('ru', n, suf == 'ми' ? INS : (pc == PREP || pc == ACC ? PREP : GEN), 'm')); i = j2 + 2; continue;
+      }
+      var sf = suffixForm(lang, suf, n, pc, nextW);
+      if (sf) {
+        if (sf[0] == 'm' && sf[1] != NOM && nextW && YEAR[lang][nextW] && YEAR[lang][nextW][1]) sf[0] = 'm';
+        emit(ordinal(lang, n, sf[1], sf[0])); i = j2 + 2; continue;
+      }
+    }
+
+    // the word after the number decides the rest
+    var nw2 = nextWordAt(j2), nextTok = t[skipSp(j2)], noun = nw2 ? nw2[1] : null, nounL = noun ? noun.toLowerCase() : null;
+    var unit = preUnit, unitAt = -1, unitEnd = j2;
+    if (!unit && nextTok && U[nextTok] && !(nextTok == 'г' && n >= 1000 && n <= 2100) && !(nextTok == 'м' && /^\p{L}/u.test(t[skipSp(j2) + 1] || ''))) {
+      // a unit after the number: 512 ГБ, 75 %, 20 $
+      if (nextTok != '°' || true) { unit = U[nextTok]; unitAt = skipSp(j2); unitEnd = unitAt + 1; }
+    }
+    var celsius = false;
+    if (unit && nextTok == '°' && /^[CС]$/.test(t[unitEnd] || '')) { celsius = true; unitEnd++; }
+
+    var words;
+    // a year: 2026 году, 1798 р., 14 сентября 2026
+    // only a calendar year (1000-2999) is an ordinal: «2 года», «228 років» are counts
+    var yearNoun = nounL && YEAR[lang][nounL];
+    if (yearNoun && !(n >= 1000 && n <= 2999 && (range ? range[0] >= 1000 : !yearNoun[1]))) yearNoun = null;
+    var afterMonth = (function () { var pw = prevWord(start); return pw && MONTH_ANY[lang].test(pw); })();
+    if (!unit && !frac && (yearNoun || (afterMonth && n >= 1000 && n <= 2999))) {
+      var yc, ypl = 0;
+      if (yearNoun) {
+        ypl = yearNoun[1];
+        yc = yearNoun[0] >= 0 ? yearNoun[0] : (yearNoun[0] == -2 ? (pc == DAT || pc == 'po' ? DAT : PREP) : (pc == ACC ? (lang == 'ru' && (prevWord(start) == 'на') ? ACC : PREP) : pc == null || pc == 'po' ? (afterMonth ? GEN : GEN) : pc));
+      } else yc = GEN;
+      var nums = range ? [range[0], range[1]] : [n];
+      words = nums.map(function (x) { return ordinal(lang, x, yc, 'm'); }).join(' — ');
+      if (yearNoun && yearNoun[0] < 0) {      // г. гг. р. рр. become the word
+        var yf = YEAR_FORMS[lang][ypl || range ? 1 : 0][yc];
+        var d2 = eatDot(nw2[0] + 1);
+        emit(words + ' ' + yf + d2[1]); i = d2[0]; continue;
+      }
+      if (!yearNoun) { emit(words + ' ' + YEAR_FORMS[lang][0][GEN]); i = j2; continue; }
+      emit(words); i = j2; continue;
+    }
+    // a date: 6 августа, 24 серпня
+    if (!unit && !frac && nounL && MONTHS[lang][nounL] && n >= 1 && n <= 31) {
+      var dc = pc == null || pc == INS ? GEN : pc == ACC || pc == 'po' ? ACC : pc;
+      var ds = range ? [range[0], range[1]] : [n];
+      emit(ds.map(function (x) { return ordinal(lang, x, dc, 'n'); }).join(' — ')); i = j2; continue;
+    }
+
+    // plain or decimal number, maybe with a unit
+    var c1 = c0, gnd;
+    if (unit) gnd = unit[0];
+    else gnd = guessGender(lang, noun, n, c1);
+    if (frac !== null) {
+      words = decimal(lang, n, frac, c1);
+    } else if (str.length > 1 && str[0] == '0') {
+      words = digits(lang, str);
+    } else if (str.length > 12) {
+      words = digits(lang, str);
+    } else {
+      words = cardinal(lang, n, c1, gnd);
+      if (range) {
+        var a = cardinal(lang, range[0], c1, gnd), b2 = cardinal(lang, range[1], c1, gnd);
+        words = a + (range[0] < 10 && range[1] < 10 ? '-' : ' — ') + b2;
+        n = range[1];
+      }
+    }
+    if (unit) {
+      var uw = frac !== null ? unit[1][GEN] : agree(lang, n, c1, unit[1], unit[2]);
+      // a currency sign before and a multiplier after: $1,5 млн, $20 тыс.
+      if (preUnit && unitAt < 0 && nextTok && MULT[lang][nextTok]) {
+        var mu = UNITS[lang][nextTok], ma = skipSp(j2), md = eatDot(ma + 1);
+        emit(words + ' ' + (frac !== null ? mu[1][GEN] : agree(lang, n, c1, mu[1], mu[2])) + ' ' + preUnit[2][GEN] + md[1]); i = md[0]; continue;
+      }
+      if (celsius) uw += ' ' + CELSIUS[lang];
+      var endAt = unitAt >= 0 ? unitEnd : j2;
+      var dt = unitAt >= 0 && /^\p{L}/u.test(t[unitAt]) ? eatDot(endAt) : [endAt, ''];
+      emit(words + ' ' + uw + dt[1]); i = dt[0]; continue;
+    }
+    emit(words); i = j2;
+  }
+  var r = o.join('');
+  // signs left alone
+  r = r.replace(/%/g, lang == 'ru' ? ' процентов' : ' відсотків').replace(/№/g, T.number).replace(/\s&\s/g, ' ' + T.and + ' ');
+  return r;
+}
+
+// abbreviations that are not about numbers
+var ABBR = {
+  ru: [[/(^|[^\p{L}])т\.\s?е\./gu, '$1то есть'], [/(^|[^\p{L}])и\s?т\.\s?д\./gu, '$1и так далее'], [/(^|[^\p{L}])и\s?т\.\s?п\./gu, '$1и тому подобное'],
+    [/(^|[^\p{L}])т\.\s?к\./gu, '$1так как'], [/(^|[^\p{L}])т\.\s?н\./gu, '$1так называемый'], [/(^|[^\p{L}])в\s?т\.\s?ч\./gu, '$1в том числе'],
+    [/(^|[^\p{L}])и\s?др\./gu, '$1и другие'], [/(^|[^\p{L}])напр\./gu, '$1например'], [/(^|[^\p{L}])см\.(?=\s)/gu, '$1смотри'], [/(^|[^\p{L}])ул\.(?=\s)/gu, '$1улица'],
+    [/(^|[^\p{L}])им\.(?=\s)/gu, '$1имени'], [/(^|[^\p{L}])стр\.(?=\s*\d)/gu, '$1страница'], [/(^|[^\p{L}])рис\.(?=\s*\d)/gu, '$1рисунок']],
+  uk: [[/(^|[^\p{L}])і\s?т\.\s?д\./gu, '$1і так далі'], [/(^|[^\p{L}])т\.\s?д\./gu, '$1так далі'], [/(^|[^\p{L}])і\s?т\.\s?п\./gu, '$1і таке інше'],
+    [/(^|[^\p{L}])і\s?т\.\s?ін\./gu, '$1і таке інше'], [/(^|[^\p{L}])т\.\s?зв\./gu, '$1так званий'], [/(^|[^\p{L}])у\s?т\.\s?ч\./gu, '$1у тому числі'],
+    [/(^|[^\p{L}])напр\./gu, '$1наприклад'], [/(^|[^\p{L}])див\.(?=\s)/gu, '$1дивись'], [/(^|[^\p{L}])вул\.(?=\s)/gu, '$1вулиця'], [/(^|[^\p{L}])ім\.(?=\s)/gu, '$1імені']]
+};
+
+// what every language gets: no emoji, no Markdown marks, links read as their site
+function clean(s) {
+  s = s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f​‌‎‏⁠﻿]/g, '');
+  s = s.replace(/\p{Extended_Pictographic}|[\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}︎️⃣‍]/gu, '');
+  s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\((?:[^()]|\([^)]*\))*\)/g, '$1');
+  s = s.replace(/<\/?[a-zA-Z][^>]*>/g, ' ');
+  s = s.replace(/https?:\/\/(?:www\.)?([^\/\s)»"]+)[^\s)»"]*/g, '$1');
+  s = s.replace(/^\s{0,3}#{1,6}\s+/gm, '').replace(/^\s{0,3}>\s?/gm, '').replace(/^\s*(?:[-*+•▪◦‣]|\d+[.)])\s+(?=\S)/gm, function (m) { return /\d/.test(m) ? m : ''; });
+  s = s.replace(/(\*\*|__|~~|`{1,3})(?=\S)([\s\S]*?\S)\1/g, '$2').replace(/(^|[\s(])[*_](?=\S)([^*_\n]*?\S)[*_](?=[\s).,!?:;]|$)/g, '$1$2');
+  s = s.replace(/(^|[\s(])#(?=\p{L})/gu, '$1').replace(/(^|[\s;:,])(\d{1,2})\)\s/g, '$1$2, ');
+  s = s.replace(/`+/g, '').replace(/^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*$/gm, '').replace(/\s*\|\s*/g, ', ');
+  s = s.replace(/[      ]/g, ' ');
+  return s;
+}
+
+function prepare(par, lang) {
+  par = clean(par);
+  if (lang == 'ru' || lang == 'uk') {
+    // an abbreviation that ends a sentence keeps the full stop: «и т. д. Потом» -> «и так далее. Потом»
+    ABBR[lang].forEach(function (r) {
+      par = par.replace(r[0], function (m) {
+        var off = arguments[arguments.length - 2], src = arguments[arguments.length - 1], after = src.slice(off + m.length);
+        var w = m.replace(r[0], r[1]); r[0].lastIndex = 0;
+        return w + (/\.$/.test(m) && /^\s*(\p{Lu}\p{Ll}|$)/u.test(after) ? '.' : '');
+      });
+    });
+    try { par = normalizeSlav(par, lang); } catch (e) { warn('text step failed on «' + par.slice(0, 60) + '»: ' + e); }
+  }
+  return par.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+// ---------------------------------------------------------------- text -> parts
+
+// Paragraphs and sentences keep where they stand in the text as given (UTF-16 offsets, as JavaScript
+// and NSString count them): the TTS app marks the sentence being read. Each paragraph carries a map
+// from its own characters back to the text.
+function paragraphs(text) {
+  var re = /\r\n|\r|\n/g, lines = [], pos = 0, m;
+  while ((m = re.exec(text))) { lines.push([text.slice(pos, m.index), pos]); pos = m.index + m[0].length; }
+  lines.push([text.slice(pos), pos]);
+  var out = [], cur = null;
+  lines.forEach(function (x) {
+    var l = x[0].trim();
+    if (!l) { if (cur) out.push(cur); cur = null; return; }
+    var at = x[1] + x[0].indexOf(l), map = [];
+    for (var k = 0; k < l.length; k++) map.push(at + k);
+    // a hard-wrapped line goes on when the line before did not end a sentence and this one starts small
+    if (cur && !/[.!?…:;»"”)]$/.test(cur.text) && /^[\p{Ll}\d,(«"]/u.test(l)) {
+      cur.map.push(cur.map[cur.map.length - 1] + 1);
+      cur.text += ' ' + l; cur.map = cur.map.concat(map);
+    } else { if (cur) out.push(cur); cur = { text: l, map: map }; }
+  });
+  if (cur) out.push(cur);
+  return out;
+}
+// Sentences of a paragraph as [from, to) in it; one longer than `max` is cut at , ; — then at a space.
+function sentences(par, max) {
+  var s = par.text, re = /([.!?…]["»”)]*)\s+(?=["«„(\p{Lu}\d—–-])/gu, out = [], from = 0, m;
+  var push = function (a, b) {
+    while (b - a > max) {
+      var x = s.slice(a, a + max), cut = x.lastIndexOf(', ');
+      if (cut < max / 3) cut = x.lastIndexOf('; ');
+      if (cut < max / 3) cut = x.lastIndexOf(' — ');
+      if (cut < max / 3) cut = x.lastIndexOf(' ');
+      if (cut < max / 3) cut = max - 1;
+      out.push([a, a + cut + 1]);
+      a += cut + 1; while (a < b && /\s/.test(s[a])) a++;
+    }
+    if (b > a) out.push([a, b]);
+  };
+  while ((m = re.exec(s))) { push(from, m.index + m[1].length); from = m.index + m[0].length; }
+  push(from, s.length);
+  return out;
+}
+// The whole text step: paragraphs with their language, sentences with their place and the words to
+// say. opts.max: the longest piece a voice gets at once. Calls each(paragraph) as it goes, so a
+// long text starts sounding before the rest is prepared.
+function plan(text, lang, max, each) {
+  var last = null, pars = paragraphs(text);
+  pars.forEach(function (p, k) {
+    var l = lang != 'auto' ? lang : (detect(p.text) || last);
+    // nothing to tell the first paragraphs by (a number, a date): the first language found later
+    for (var j = k + 1; !l && j < pars.length; j++) l = detect(pars[j].text);
+    if (l) last = l;
+    var ss = sentences(p, max).map(function (r) {
+      return { from: p.map[r[0]], to: p.map[r[1] - 1] + 1, text: prepare(p.text.slice(r[0], r[1]), l || 'ru') };
+    }).filter(function (x) { return /[\p{L}\p{N}]/u.test(x.text); });
+    each({ lang: l, text: p.text, sentences: ss });
+  });
+}
+var PART = 1200;   // characters a job: ~10 s of speech; small enough to spread over the workers
+
+// ---------------------------------------------------------------- speech
+
+// speed (1 = the Mac's normal) -> AVSpeechUtterance.rate; measured 2026-11-10 on Siri Yelena,
+// Aleksei and Lesya: the same curve for all three, 0.56x at rate 0 to 3.93x at rate 1
+var SPEED = [[0.56, 0], [0.65, 0.1], [0.73, 0.2], [0.82, 0.3], [0.91, 0.4], [1, 0.5], [1.30, 0.55], [1.59, 0.6], [1.88, 0.65], [2.17, 0.7], [2.77, 0.8], [3.36, 0.9], [3.93, 1]];
+function rateFor(s) {
+  for (var i = 1; i < SPEED.length; i++) if (s <= SPEED[i][0]) {
+    var a = SPEED[i - 1], b = SPEED[i];
+    return a[1] + (b[1] - a[1]) * (s - a[0]) / (b[0] - a[0]);
+  }
+  return 1;
+}
+
+var finished = false;
+ObjC.registerSubclass({
+  name: 'TTSDone', protocols: ['AVSpeechSynthesizerDelegate'],
+  methods: {
+    'speechSynthesizer:didFinishSpeechUtterance:': { types: ['void', ['id', 'id']], implementation: function () { finished = true; } },
+    'speechSynthesizer:didCancelSpeechUtterance:': { types: ['void', ['id', 'id']], implementation: function () { finished = true; } }
+  }
+});
+var SYN = null, DEL = null;
+// Speaks `text` into a CAF file as the voice makes it (32-bit float, the voice's own rate: 48 kHz
+// for Siri, 22.05 kHz for the compact voices); the file grows buffer by buffer, so the TTS app plays
+// it while it is being made. Returns '' or the error.
+function renderCaf(voiceId, rate, pitch, text, cafPath) {
+  if (!SYN) { SYN = $.AVSpeechSynthesizer.alloc.init; DEL = $.TTSDone.alloc.init; SYN.delegate = DEL; }
+  var voice = $.AVSpeechSynthesisVoice.voiceWithIdentifier(voiceId);
+  if (voice.isNil()) return 'no voice ' + voiceId;
+  var u = $.AVSpeechUtterance.speechUtteranceWithString(text);
+  u.voice = voice; u.rate = rate; u.pitchMultiplier = pitch; u.preUtteranceDelay = 0; u.postUtteranceDelay = 0;
+  var file = null, err = '';
+  finished = false;
+  SYN.writeUtteranceToBufferCallback(u, function (buf) {
+    if (err || !buf.frameLength) return;
+    if (file === null) {
+      var e = Ref();
+      file = $.AVAudioFile.alloc.initForWritingSettingsCommonFormatInterleavedError($.NSURL.fileURLWithPath(cafPath), buf.format.settings, buf.format.commonFormat, buf.format.isInterleaved, e);
+      if (file.isNil()) { err = 'cannot write ' + cafPath; file = null; return; }
+    }
+    file.writeFromBufferError(buf, null);
+  });
+  // a stuck utterance must not hang the run: Siri renders ~120 characters a second
+  var limit = Date.now() + 60000 + text.length * 100;
+  while (!finished && Date.now() < limit) $.NSRunLoop.mainRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.01));
+  if (!finished) { SYN.stopSpeakingAtBoundary(0); err = err || 'timeout'; }
+  file = null;
+  if (err) return err;
+  return exists(cafPath) ? '' : 'no audio';
+}
+// one part -> a 48 kHz mono 16-bit WAV (the command line joins these)
+function render(voiceId, rate, pitch, textPath, wavPath) {
+  var caf = wavPath.replace(/\.wav$/, '.caf');
+  var err = renderCaf(voiceId, rate, pitch, readText(textPath), caf);
+  if (err) { rm(caf); return err; }
+  var r = sh('/usr/bin/afconvert', ['-f', 'WAVE', '-d', 'LEI16@48000', '-c', '1', caf, wavPath]);
+  rm(caf);
+  return r[0] == 0 ? '' : 'afconvert: ' + r[1].trim();
+}
+function worker(jobsPath) {
+  var lines = readText(jobsPath).split('\n');
+  lines.forEach(function (ln) {
+    var f = ln.split('\t');
+    if (f.length < 5) return;
+    var e = render(f[0], parseFloat(f[1]), parseFloat(f[2]), f[3], f[4]);
+    if (e) writeText(f[4] + '.err', e);
+  });
+}
+
+// ---------------------------------------------------------------- the TTS app's worker
+//
+// `tts --serve`: one JSON object a line on stdin, one a line back on stdout, each answer carrying the
+// request's id. The app keeps a few of these running: the voices, the text step and the speech are
+// this file's, so the app and the command read a text the same way.
+//   {"op":"voices"}                                    -> {"voices":[{id,name,lang,code,gender,kind}]}
+//   {"op":"plan","text","lang","max","voice","gender"} -> one {"par":{lang,voice,sentences:[{from,to,text}]}}
+//                                                         a paragraph, then {"done":true}
+//   {"op":"pick","langs":[...],"voice","gender"}       -> {"pick":{lang: id}}
+//   {"op":"render","voice","speed","text","path"}      -> {"done":true} or {"error":"..."}; the CAF at path
+//                                                         grows while the voice speaks
+// voice: {lang: id} chosen in the app; gender 1 or 2 for the languages without a choice; speed as
+// for -r (1 = the Mac's normal).
+function voiceChooser(named, gender) {
+  var cache = {}, first = null;
+  return function (code) {
+    if (!code) code = first || 'en';
+    if (!first) first = code;
+    if (cache[code] !== undefined) return cache[code];
+    var v = named[code] ? findVoice(named[code]) : null;
+    v = v || best(code, gender);
+    if (!v && code.indexOf('-') > 0) v = best(code.split('-')[0], gender);
+    if (!v) v = best(first, gender) || best('en', gender) || voices()[0] || null;
+    return (cache[code] = v);
+  };
+}
+function serve() {
+  var inp = $.NSFileHandle.fileHandleWithStandardInput, std = $.NSFileHandle.fileHandleWithStandardOutput;
+  var nl = $('\n').dataUsingEncoding($.NSUTF8StringEncoding), buf = $.NSMutableData.data;
+  var send = function (o) { std.writeData($(JSON.stringify(o) + '\n').dataUsingEncoding($.NSUTF8StringEncoding)); };
+  while (true) {
+    var d = inp.availableData;
+    if (Number(d.length) == 0) return;            // the app has gone: stdin closed
+    buf.appendData(d);
+    while (true) {                                // whole lines only: UTF-8 may be cut between reads
+      var r = buf.rangeOfDataOptionsRange(nl, 0, $.NSMakeRange(0, buf.length));
+      if (r.location > 1e15 || Number(r.length) == 0) break;   // NSNotFound
+      var line = $.NSString.alloc.initWithDataEncoding(buf.subdataWithRange($.NSMakeRange(0, r.location)), $.NSUTF8StringEncoding).js;
+      buf.replaceBytesInRangeWithBytesLength($.NSMakeRange(0, Number(r.location) + 1), null, 0);
+      var q; try { q = JSON.parse(line); } catch (e) { send({ error: 'bad request: ' + e }); continue; }
+      try {
+        if (q.op == 'voices') {
+          send({ id: q.id, voices: voices().map(function (v) { return { id: v.id, name: v.name, lang: v.lang, code: v.code, gender: v.gender, kind: kind(v) }; }) });
+        } else if (q.op == 'plan') {
+          var pick = voiceChooser(q.voice || {}, q.gender || 2);
+          plan(q.text, q.lang || 'auto', q.max || 400, function (p) {
+            var v = pick(p.lang);
+            send({ id: q.id, par: { lang: p.lang, voice: v ? v.id : '', sentences: p.sentences } });
+          });
+          send({ id: q.id, done: true });
+        } else if (q.op == 'pick') {
+          var pk = voiceChooser(q.voice || {}, q.gender || 2), res = {};
+          (q.langs || []).forEach(function (l) { var v = pk(l); res[l] = v ? v.id : ''; });
+          send({ id: q.id, pick: res });
+        } else if (q.op == 'render') {
+          var e = renderCaf(q.voice, rateFor(q.speed || 1), q.pitch || 1, q.text, q.path);
+          send(e ? { id: q.id, error: e } : { id: q.id, done: true });
+        } else if (q.op == 'quit') {
+          return;
+        } else send({ id: q.id, error: 'unknown op ' + q.op });
+      } catch (e) { send({ id: q.id, error: String(e) }); }
+    }
+  }
+}
+
+// ---------------------------------------------------------------- WAV assembly
+
+function latin1(data) { return $.NSString.alloc.initWithDataEncoding(data, $.NSISOLatin1StringEncoding).js; }
+function u32(s, o) { return (s.charCodeAt(o) | s.charCodeAt(o + 1) << 8 | s.charCodeAt(o + 2) << 16) + s.charCodeAt(o + 3) * 16777216; }
+function le(n, b) { var s = ''; for (var i = 0; i < b; i++) { s += String.fromCharCode(n & 255); n = Math.floor(n / 256); } return s; }
+function pcmOf(path) {          // the data chunk of a WAV
+  var d = $.NSData.dataWithContentsOfFile(path), len = Number(d.length);
+  var head = latin1(d.subdataWithRange($.NSMakeRange(0, Math.min(len, 8192))));
+  var o = 12;
+  while (o + 8 <= head.length) {
+    var id = head.substr(o, 4), size = u32(head, o + 4);
+    if (id == 'data') return d.subdataWithRange($.NSMakeRange(o + 8, Math.min(size, len - o - 8)));
+    o += 8 + size + (size & 1);
+  }
+  return null;
+}
+function assemble(parts, wavOut) {     // parts: [{wav, gapAfter}]
+  FM.createFileAtPathContentsAttributes(wavOut, $.NSData.data, $());
+  var fh = $.NSFileHandle.fileHandleForWritingAtPath(wavOut), total = 0;
+  fh.writeData($(le(0, 44)).dataUsingEncoding($.NSISOLatin1StringEncoding));
+  parts.forEach(function (p) {
+    var pcm = pcmOf(p.wav);
+    if (!pcm) die('broken part ' + p.wav);
+    fh.writeData(pcm); total += Number(pcm.length);   // NSData.length arrives as a string in JXA
+    if (p.gap) { var z = $.NSMutableData.dataWithLength(Math.round(p.gap * 48000) * 2); fh.writeData(z); total += Number(z.length); }
+  });
+  var h = 'RIFF' + le(36 + total, 4) + 'WAVEfmt ' + le(16, 4) + le(1, 2) + le(1, 2) + le(48000, 4) + le(96000, 4) + le(2, 2) + le(16, 2) + 'data' + le(total, 4);
+  fh.seekToFileOffset(0);
+  fh.writeData($(h).dataUsingEncoding($.NSISOLatin1StringEncoding));
+  fh.closeFile;
+  return total / 96000;
+}
+
+// ---------------------------------------------------------------- main
+
+var GAP_SENT = 0.45, GAP_PAR = 0.75;   // seconds; Siri's own pause after a sentence is 0.25-0.45 s
+var USAGE = 'usage: tts [-v VOICE] [-r SPEED] [-p PITCH] [-l LANG] [-f mp3|m4a|wav|aiff] [-o PATH] [-n NAME] FILE|-\n' +
+  '       tts -t [-l LANG] FILE|-      text as it will be read\n' +
+  '       tts -L [LANG]                voices\n' +
+  'VOICE: female (default) | male | a name or id from -L; several, comma-separated, one per language\n' +
+  'SPEED: 0.6-3.9, 1 = normal; PITCH: 0.5-2, 1 = normal; LANG: auto (default, per paragraph) or a code';
+
+function run(argv) {
+  if (argv[0] == '--worker') { worker(argv[1]); return; }
+  if (argv[0] == '--serve') { serve(); return; }
+  var a = { v: 'female', r: 1, p: 1, l: 'auto', f: null, o: null, n: '', t: false, L: null, file: null };
+  for (var i = 0; i < argv.length; i++) {
+    var x = argv[i];
+    if (x == '-t') a.t = true;
+    else if (x == '-L') { a.L = argv[i + 1] && argv[i + 1][0] != '-' ? argv[++i] : ''; }
+    else if (x == '-h' || x == '--help') { out(USAGE); return; }
+    else if (/^-[vrplfon]$/.test(x)) { if (i + 1 >= argv.length) die('missing value for ' + x + '\n' + USAGE); a[x[1]] = argv[++i]; }
+    else if (x[0] == '-' && x != '-') die('unknown option ' + x + '\n' + USAGE);
+    else a.file = x;
+  }
+  if (a.L !== null) { listVoices(a.L); return; }
+  if (!a.file) die(USAGE);
+  var speed = parseFloat(a.r), pitch = parseFloat(a.p);
+  if (!(speed >= 0.56 && speed <= 3.93)) die('speed ' + a.r + ' is outside 0.6-3.9');
+  if (!(pitch >= 0.5 && pitch <= 2)) die('pitch ' + a.p + ' is outside 0.5-2');
+
+  var text;
+  if (a.file == '-') text = $.NSString.alloc.initWithDataEncoding($.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile, $.NSUTF8StringEncoding).js;
+  else { if (!exists(a.file)) die('no such file: ' + a.file); text = readText(a.file); }
+  if (text == null) die('cannot read ' + a.file + ' as text');
+  if (!text.trim()) die('text is empty');
+
+  // paragraphs with their language, sentences prepared (the text step), as the app gets them
+  var pars = [];
+  plan(text, a.l, PART, function (p) { pars.push(p); });
+  var first = pars.map(function (p) { return p.lang; }).filter(Boolean)[0] || 'ru';
+
+  // voices: the named ones for their languages, the best of the gender for the rest
+  var gender = 2, named = {};
+  a.v.split(',').forEach(function (q) {
+    q = q.trim();
+    if (q == 'female') gender = 2; else if (q == 'male') gender = 1;
+    else if (q) { var v = findVoice(q); if (!v) die('no voice «' + q + '»; see tts -L'); named[v.code] = v; if (v.gender) gender = v.gender; }
+  });
+  var voiceOf = {}, fallbackNote = {};
+  function pick(code) {
+    if (voiceOf[code] !== undefined) return voiceOf[code];
+    var v = named[code] || best(code, gender);
+    if (!v && code.indexOf('-') > 0) v = best(code.split('-')[0], gender);
+    if (!v) { v = named[first] || best(first, gender) || best('en', gender); if (!fallbackNote[code]) { warn('no voice for «' + code + '», read with ' + (v ? v.name : '?')); fallbackNote[code] = 1; } }
+    return (voiceOf[code] = v);
+  }
+
+  if (a.t) { pars.forEach(function (p) { out('[' + (p.lang || first) + '] ' + p.sentences.map(function (x) { return x.text; }).join(' ')); }); return; }
+
+  // sentences joined into parts of up to PART characters: fewer, longer jobs for the workers
+  var parts = [];
+  pars.forEach(function (p) {
+    if (!p.sentences.length) return;
+    var v = pick(p.lang || first);
+    if (!v) die('no voices installed');
+    var s = [], cur = '';
+    p.sentences.forEach(function (x) {
+      if (cur && cur.length + x.text.length + 1 > PART) { s.push(cur); cur = x.text; } else cur = cur ? cur + ' ' + x.text : x.text;
+    });
+    if (cur) s.push(cur);
+    s.forEach(function (x, m) { parts.push({ text: x, voice: v.id, gap: m == s.length - 1 ? GAP_PAR : GAP_SENT }); });
+  });
+  if (!parts.length) die('nothing to read');
+  parts[parts.length - 1].gap = 0;
+
+  // output path and format
+  var ffmpeg = which('ffmpeg'), fmt = a.f, dir, name = a.n;
+  if (a.o && /\.(mp3|m4a|wav|aiff?)$/i.test(a.o)) {
+    fmt = fmt || a.o.match(/\.(\w+)$/)[1].toLowerCase().replace('aif', 'aiff').replace('aifff', 'aiff');
+    dir = $(a.o).stringByDeletingLastPathComponent.js || '.'; name = $(a.o).lastPathComponent.stringByDeletingPathExtension.js;
+  } else dir = a.o || $.NSHomeDirectory().js + '/Desktop';
+  fmt = (fmt || (ffmpeg ? 'mp3' : 'm4a')).toLowerCase();
+  if (['mp3', 'm4a', 'wav', 'aiff'].indexOf(fmt) < 0) die('format ' + fmt + ': mp3, m4a, wav or aiff');
+  if (fmt == 'mp3' && !ffmpeg) die('mp3 needs ffmpeg (brew install ffmpeg); m4a works without it: -f m4a');
+  dir = $(dir).stringByExpandingTildeInPath.js;
+  FM.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(dir, true, $(), null);
+  if (!name) {
+    var s1 = text.replace(/\s+/g, ' ').trim().replace(/[\/:\\]/g, '').slice(0, 41);
+    var mm = s1.match(/^(.{20,}?[.!?…])\s/);
+    name = mm ? mm[1] : (s1.length > 40 ? s1.replace(/\s+\S*$/, '') : s1);
+    name = name.replace(/[\s.,;:!?…-]+$/, '') || 'Speech';
+  }
+  var dest = dir + '/' + name + '.' + fmt;
+  for (var n2 = 2; exists(dest); n2++) dest = dir + '/' + name + ' (' + n2 + ').' + fmt;
+
+  // temp folder named by our pid; folders of runs that died (Ctrl-C) are removed here
+  var tmpRoot = $.NSTemporaryDirectory().js, me = $.NSProcessInfo.processInfo.processIdentifier;
+  var old = FM.contentsOfDirectoryAtPathError(tmpRoot, null);
+  if (!old.isNil()) for (var q = 0; q < old.count; q++) {
+    var nm = old.objectAtIndex(q).js, pm = nm.match(/^tts\.(\d+)$/);
+    if (pm && sh('/bin/kill', ['-0', pm[1]])[0] != 0) rm(tmpRoot + nm);
+  }
+  TMP = tmpRoot + 'tts.' + me;
+  rm(TMP); FM.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(TMP, true, $(), null);
+
+  // workers: separate osascript processes, 6 measured best on the M3 Pro (12 cores)
+  var ncpu = $.NSProcessInfo.processInfo.activeProcessorCount, W = Math.max(1, Math.min(6, Math.floor(ncpu / 2), parts.length));
+  var jobs = []; for (var w = 0; w < W; w++) jobs.push([]);
+  var rate = rateFor(speed);
+  parts.forEach(function (p, k) {
+    p.txt = TMP + '/' + k + '.txt'; p.wav = TMP + '/' + k + '.wav';
+    writeText(p.txt, p.text);
+    jobs[k % W].push([p.voice, rate, pitch, p.txt, p.wav].join('\t'));
+  });
+  var self = $.NSProcessInfo.processInfo.arguments.js.map(function (x) { return x.js; });
+  var script = self[1] == '-l' ? self[3] : self[1];
+  var tasks = jobs.map(function (j, w) {
+    var jp = TMP + '/jobs' + w + '.tsv'; writeText(jp, j.join('\n'));
+    var t = $.NSTask.alloc.init;
+    t.executableURL = $.NSURL.fileURLWithPath('/usr/bin/osascript');
+    t.arguments = $(['-l', 'JavaScript', script, '--worker', jp]);
+    t.standardOutput = $.NSFileHandle.fileHandleWithNullDevice;
+    t.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+    if (!t.launchAndReturnError(null)) die('cannot start a worker');
+    return t;
+  });
+  while (tasks.some(function (t) { return t.running; })) $.NSThread.sleepForTimeInterval(0.2);
+  // a part that failed is tried once more here
+  parts.forEach(function (p) {
+    if (exists(p.wav)) return;
+    var e = render(p.voice, rate, pitch, p.txt, p.wav);
+    if (e) die('part «' + p.text.slice(0, 50) + '…» failed: ' + e + (exists(p.wav + '.err') ? ' (first try: ' + readText(p.wav + '.err') + ')' : ''));
+  });
+
+  var wav = TMP + '/all.wav', secs = assemble(parts, wav), enc = TMP + '/out.' + fmt, r;
+  if (fmt == 'wav') r = [0, ''], enc = wav;
+  else if (fmt == 'm4a') r = sh('/usr/bin/afconvert', ['-f', 'm4af', '-d', 'aac', '-b', '64000', wav, enc]);
+  else if (fmt == 'aiff') r = sh('/usr/bin/afconvert', ['-f', 'AIFF', '-d', 'BEI16', wav, enc]);
+  else r = sh(ffmpeg, ['-nostdin', '-v', 'error', '-i', wav, '-c:a', 'libmp3lame', '-b:a', '64k', '-ac', '1', enc]);
+  if (r[0] != 0) die('encoding failed: ' + r[1].trim());
+  if (!FM.moveItemAtPathToPathError(enc, dest, null)) die('cannot write ' + dest);
+  cleanup();
+  out(dest + '  ' + clock(secs));
+}

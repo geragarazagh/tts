@@ -1,5 +1,5 @@
-// TTS: text to speech on the Mac, offline, with Supertonic 3 voices. One window: voice and speed on top, the text in
-// the middle, the player at the bottom.
+// TTS: text to speech on the Mac with its own voices, Siri's among them, offline. One window: voice and speed on top,
+// the text in the middle, the player at the bottom.
 
 import AppKit
 import UniformTypeIdentifiers
@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 @main
 @MainActor final class App: NSObject, NSApplicationDelegate {
     static func main() {
+        registerAppDefaults()
         let app = NSApplication.shared
         let d = App()
         app.delegate = d
@@ -17,12 +18,19 @@ import UniformTypeIdentifiers
     var window: MainWindow!
 
     func applicationWillFinishLaunching(_ n: Notification) {
-        UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": false, "voice": 0, "speed": Speed.standard])
+        let d = UserDefaults.standard
+        // 0.1 and 0.2 spoke with Supertonic: their voice number means nothing now, and their speed scale was another
+        if d.object(forKey: "voice") != nil { d.removeObject(forKey: "voice"); d.removeObject(forKey: "speed") }
+        // ...and their 401 MB voice model, which nothing reads any more: the app's own folder, removed once
+        let fm = FileManager.default
+        if let tts = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appendingPathComponent("TTS") {
+            try? fm.removeItem(at: tts.appendingPathComponent("Supertonic 3"))
+            if (try? fm.contentsOfDirectory(atPath: tts.path))?.allSatisfy({ $0 == ".DS_Store" }) == true { try? fm.removeItem(at: tts) }
+        }
         NSApp.mainMenu = makeMenu()
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        Model.removeParts()
         window = MainWindow()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -38,6 +46,9 @@ import UniformTypeIdentifiers
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+
+    // A voice may have been downloaded in System Settings meanwhile.
+    func applicationDidBecomeActive(_ n: Notification) { Engine.shared.loadVoices() }
 
     func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows: Bool) -> Bool {
         window?.makeKeyAndOrderFront(nil)
@@ -76,9 +87,6 @@ import UniformTypeIdentifiers
         _ = sub("TTS", [
             item(L("About TTS"), #selector(about)),
             check,
-            .separator(),
-            item(L("Show Model in Finder"), #selector(MainWindow.showModel)),
-            item(L("Delete Model…"), #selector(MainWindow.deleteModel)),
             .separator(),
             services,
             .separator(),
@@ -151,9 +159,7 @@ import UniformTypeIdentifiers
         credits.append(link(L("Herman Harazha"), "https://geragaraza.com"))
         credits.append(NSAttributedString(string: " · ", attributes: base))
         credits.append(link(L("GitHub"), "https://github.com/geragarazagh/tts"))
-        credits.append(NSAttributedString(string: "\n", attributes: base))
-        credits.append(NSAttributedString(string: L("Voices: Supertonic 3 by Supertone") + " · ", attributes: base))
-        credits.append(link("OpenRAIL\u{2011}M", "https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE"))
+        credits.append(NSAttributedString(string: "\n" + L("Voices: Apple"), attributes: base))
         NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
         NSApp.activate(ignoringOtherApps: true)
     }

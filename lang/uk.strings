@@ -1,8 +1,6 @@
 /* Menu terms as TextEdit (Мініредактор) has them on macOS 27 (Edit.loctable), the rest written for TTS. */
 "About TTS" = "Про TTS";
 "Check for Updates…" = "Перевірити наявність оновлень…";
-"Show Model in Finder" = "Показати модель у Finder";
-"Delete Model…" = "Видалити модель…";
 "Services" = "Служби";
 "Hide TTS" = "Сховати TTS";
 "Hide Others" = "Сховати решту";
@@ -37,11 +35,8 @@
 "Bring All to Front" = "Усі наперед";
 "Herman Harazha" = "Герман Гаража";
 "GitHub" = "Гітхаб";
-"Voices: Supertonic 3 by Supertone" = "Голоси: Supertonic 3 від Supertone";
 
 "Voice" = "Голос";
-"Male" = "Чоловічі";
-"Female" = "Жіночі";
 "Voice %d" = "Голос %d";
 "Speed" = "Швидкість";
 "Paste text or drop a file" = "Вставте текст або перетягніть файл";
@@ -51,18 +46,13 @@
 "Forward 15 Seconds" = "Уперед на 15 секунд";
 "Saving MP3…" = "Збереження MP3…";
 "Cancel" = "Скасувати";
-"Download" = "Завантажити";
-"MB" = "МБ";
-"Voices need the Supertonic 3 model, %@." = "Для голосів потрібна модель Supertonic 3, %@.";
-"Not enough disk space" = "Недостатньо місця на диску";
-"%1$@ needs %2$@. Free: %3$@." = "%1$@ займає %2$@. Вільно: %3$@.";
-"The download failed" = "Не вдалося завантажити";
-"Delete the Supertonic 3 model?" = "Видалити модель Supertonic 3?";
-"%@. The voices will need it downloaded again." = "%@. Для голосів її доведеться завантажити знову.";
-"The model could not be deleted" = "Не вдалося видалити модель";
-"The model could not be loaded" = "Не вдалося відкрити модель";
 "This file could not be read" = "Не вдалося прочитати цей файл";
 "Speech could not be made" = "Не вдалося створити мовлення";
 "The MP3 could not be saved" = "Не вдалося зберегти MP3";
 "Listen" = "Послухати";
 "Stop" = "Зупинити";
+"Voices: Apple" = "Голоси: Apple";
+"Download Siri Voices…" = "Викачати голоси Siri…";
+"System voice ⓘ › %@" = "Основний голос ⓘ › %@";
+"System voice › Manage Voices…" = "Основний голос › Керувати голосами…";
+"The text changed" = "Текст змінився";

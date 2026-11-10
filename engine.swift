@@ -1,293 +1,216 @@
-import Foundation
-import COnnxRuntime
+// The voices: Apple's, Siri's among them, spoken by the `tts` script in the app's Resources, run by macOS's own
+// /usr/bin/osascript. Why not AVSpeechSynthesizer in the app itself: macOS lists Siri voices only to processes Apple
+// signed. A Developer ID app sees Milena, Katya, Yuri, Lesya and nothing better; the same app starting osascript gets
+// every Siri voice (measured 2026-11-10 on macOS 27.2 and a clean 26.6.2). osascript is part of every Mac, so nothing
+// is installed for it. Apple doesn't document this way and may close it; then the voices it gives apps are used.
+//
+// `tts` is also the author's command line tool, the same file: the text step (numbers, dates, units, abbreviations
+// in ru and uk read in the right case), the choice of voice per paragraph and the speed curve are one code, measured
+// once. Here it runs as `tts --serve`: one JSON request a line on stdin, the answers a line each on stdout.
 
-// Supertonic 3 inference on ONNX Runtime's C API. A line-by-line port of the
-// reference Python package (supertonic 1.3.1, core.py): same text cleaning,
-// same four models, same flow-matching loop. Checked against it sample by sample.
+import Foundation
+
+struct VoiceInfo: Equatable {
+    let id: String, name: String, lang: String, code: String, gender: Int, kind: String
+    var isSiri: Bool { kind == "Siri" }
+}
+
+/// One `osascript tts --serve`. Requests go one at a time; the answers are read on a thread of their own and handed
+/// to the main thread.
+final class Worker: @unchecked Sendable {
+    private let process = Process()
+    private let input = Pipe(), output = Pipe()
+    private var pending: [Int: ([String: Any]) -> Bool] = [:]     // id -> handler; true when it was the last line
+    private let lock = NSLock()
+    private var nextID = 1
+    var busy: Int { lock.lock(); defer { lock.unlock() }; return pending.count }
+    private(set) var dead = false
+    var onDeath: (() -> Void)?
+    var lastUsed = Date()
+
+    init() throws {
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        guard let script = Bundle.main.url(forResource: "tts", withExtension: nil) else { throw EngineError("tts is missing from the app") }
+        process.arguments = ["-l", "JavaScript", script.path, "--serve"]
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] _ in self?.died() }
+        try process.run()
+        Thread.detachNewThread { [weak self] in self?.readLoop() }
+    }
+
+    /// Sends a request; `handler` gets every answer line on the main thread and returns true at the last one.
+    func send(_ request: [String: Any], handler: @escaping ([String: Any]) -> Bool) {
+        lock.lock()
+        let id = nextID; nextID += 1
+        pending[id] = handler
+        lock.unlock()
+        lastUsed = Date()
+        var r = request; r["id"] = id
+        guard var data = try? JSONSerialization.data(withJSONObject: r) else { return }
+        data.append(0x0a)
+        do { try input.fileHandleForWriting.write(contentsOf: data) } catch { kill() }
+    }
+
+    private func readLoop() {
+        let h = output.fileHandleForReading
+        var buffer = Data()
+        while true {
+            let d = h.availableData
+            if d.isEmpty { break }
+            buffer.append(d)
+            while let nl = buffer.firstIndex(of: 0x0a) {
+                let line = buffer[buffer.startIndex..<nl]
+                buffer = Data(buffer[buffer.index(after: nl)...])
+                guard let o = try? JSONSerialization.jsonObject(with: line) as? [String: Any], let id = o["id"] as? Int else { continue }
+                DispatchQueue.main.async {
+                    self.lock.lock(); let h = self.pending[id]; self.lock.unlock()
+                    if let h, h(o) { self.lock.lock(); self.pending[id] = nil; self.lock.unlock(); self.lastUsed = Date() }
+                }
+            }
+        }
+    }
+
+    private func died() {
+        DispatchQueue.main.async {
+            guard !self.dead else { return }
+            self.dead = true
+            // whoever waits gets an answer
+            self.lock.lock(); let hs = self.pending; self.pending = [:]; self.lock.unlock()
+            for (_, h) in hs { _ = h(["error": "the voice process ended"]) }
+            self.onDeath?()
+        }
+    }
+
+    func kill() {
+        try? input.fileHandleForWriting.close()
+        if process.isRunning { process.terminate() }
+    }
+}
 
 struct EngineError: Error, CustomStringConvertible {
     let description: String
+    init(_ d: String) { description = d }
+    init(description d: String) { description = d }
 }
 
-private let api: OrtApi = OrtGetApiBase().pointee.GetApi(UInt32(ORT_API_VERSION))!.pointee
+/// The workers. One answers the quick questions (voices, the text step); the rest speak, as many at once as the
+/// speech asks for, up to `limit`. Measured on the M3 Pro, 2026-11-10: one worker speaks about 120 characters a
+/// second (5-6 times faster than speech at 1x), six 298 (much of the work is in Apple's own sirittsd, so more don't
+/// help). Idle speakers end after a minute; one stays ready, so a new start or a new speed sounds at once.
+@MainActor final class Engine {
+    static let shared = Engine()
+    static var limit: Int { max(2, min(6, Workers.performanceCores)) }
 
-private func check(_ status: OpaquePointer?) throws {
-    guard let status else { return }
-    let msg = String(cString: api.GetErrorMessage(status)!)
-    api.ReleaseStatus(status)
-    throw EngineError(description: msg)
-}
+    private var control: Worker?
+    private var speakers: [Worker] = []
+    private var sweeper: Timer?
+    private(set) var voices: [VoiceInfo] = []
+    var onVoices: (() -> Void)?
 
-// MARK: - Model files
-
-enum ModelFiles {
-    // Upstream: huggingface.co/Supertone/supertonic-3, commit 724fb5a (the repo
-    // on GitHub was archived 2026-08; these files will not change).
-    static let onnx = ["duration_predictor", "text_encoder", "vector_estimator", "vocoder"]
-    static let voices = ["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5"]
-}
-
-struct Voice {
-    let ttl: [Float]     // 1 x 50 x 256
-    let dp: [Float]      // 1 x 8 x 16
-    let ttlShape: [Int64]
-    let dpShape: [Int64]
-
-    init(url: URL) throws {
-        struct Part: Decodable { let dims: [Int64]; let data: [[[Float]]] }
-        struct File: Decodable { let style_ttl: Part; let style_dp: Part }
-        let f = try JSONDecoder().decode(File.self, from: Data(contentsOf: url))
-        ttl = f.style_ttl.data.flatMap { $0.flatMap { $0 } }
-        dp = f.style_dp.data.flatMap { $0.flatMap { $0 } }
-        ttlShape = f.style_ttl.dims
-        dpShape = f.style_dp.dims
-    }
-}
-
-// MARK: - Text, as core.py prepares it
-
-enum TextPrep {
-    static let languages: Set<String> = ["en", "ko", "ja", "ar", "bg", "cs", "da", "de", "el", "es", "et", "fi", "fr", "hi", "hr", "hu", "id", "it", "lt", "lv", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi"]
-
-    private static let symbols: [(String, String)] = [
-        ("\u{2013}", "-"), ("\u{2011}", "-"), ("\u{2014}", "-"), ("\u{00AF}", " "), ("_", " "),
-        ("\u{201C}", "\""), ("\u{201D}", "\""), ("\u{2018}", "'"), ("\u{2019}", "'"),
-        ("\u{00B4}", "'"), ("`", "'"), ("[", " "), ("]", " "), ("|", " "), ("/", " "),
-        ("#", " "), ("\u{2192}", " "), ("\u{2190}", " "),
-    ]
-    private static let removed: Set<Unicode.Scalar> = ["\u{2665}", "\u{2606}", "\u{2661}", "\u{00A9}", "\\"]
-    private static let ending = try! NSRegularExpression(pattern: "[.!?;:,'\"')\\]}…。」』】〉》›»]$")
-    private static let spaces = try! NSRegularExpression(pattern: "\\s+")
-    private static let dupQuotes = try! NSRegularExpression(pattern: "([\"'`])\\1+")
-
-    static func isEmoji(_ v: UInt32) -> Bool {
-        (0x1F600...0x1F64F).contains(v) || (0x1F300...0x1F5FF).contains(v) || (0x1F680...0x1F6FF).contains(v)
-            || (0x1F700...0x1F77F).contains(v) || (0x1F780...0x1F7FF).contains(v) || (0x1F800...0x1F8FF).contains(v)
-            || (0x1F900...0x1F9FF).contains(v) || (0x1FA00...0x1FA6F).contains(v) || (0x1FA70...0x1FAFF).contains(v)
-            || (0x2600...0x26FF).contains(v) || (0x2700...0x27BF).contains(v) || (0x1F1E6...0x1F1FF).contains(v)
+    private init() {
+        sweeper = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { _ in MainActor.assumeIsolated { Engine.shared.sweep() } }
     }
 
-    static func clean(_ input: String) -> String {
-        var t = input.decomposedStringWithCompatibilityMapping
-        var scalars = String.UnicodeScalarView()
-        for s in t.unicodeScalars where !isEmoji(s.value) { scalars.append(s) }
-        t = String(scalars)
-        for (a, b) in symbols { t = t.replacingOccurrences(of: a, with: b) }
-        scalars = String.UnicodeScalarView()
-        for s in t.unicodeScalars where !removed.contains(s) { scalars.append(s) }
-        t = String(scalars)
-        for (a, b) in [("@", " at "), ("e.g.,", "for example, "), ("i.e.,", "that is, ")] {
-            t = t.replacingOccurrences(of: a, with: b)
-        }
-        for p in [",", ".", "!", "?", ";", ":", "'"] { t = t.replacingOccurrences(of: " " + p, with: p) }
-        t = dupQuotes.stringByReplacingMatches(in: t, range: NSRange(t.startIndex..., in: t), withTemplate: "$1")
-        t = spaces.stringByReplacingMatches(in: t, range: NSRange(t.startIndex..., in: t), withTemplate: " ")
-        t = t.trimmingCharacters(in: .whitespaces)
-        if ending.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) == nil { t += "." }
-        return t
-    }
-}
-
-// MARK: - Engine
-
-final class Supertonic {
-    let sampleRate: Int
-    private let chunk: Int            // samples per latent frame
-    private let latentChannels: Int
-    private let indexer: [Int64]
-    private var env: OpaquePointer?
-    private var dp: OpaquePointer?
-    private var enc: OpaquePointer?
-    private var est: OpaquePointer?
-    private var voc: OpaquePointer?
-    private var mem: OpaquePointer?
-    private var alloc: UnsafeMutablePointer<OrtAllocator>?
-
-    init(onnxDir: URL, threads: Int) throws {
-        struct Cfg: Decodable {
-            struct AE: Decodable { let sample_rate: Int; let base_chunk_size: Int }
-            struct TTL: Decodable { let chunk_compress_factor: Int; let latent_dim: Int }
-            let ae: AE; let ttl: TTL
-        }
-        let cfg = try JSONDecoder().decode(Cfg.self, from: Data(contentsOf: onnxDir.appendingPathComponent("tts.json")))
-        sampleRate = cfg.ae.sample_rate
-        chunk = cfg.ae.base_chunk_size * cfg.ttl.chunk_compress_factor
-        latentChannels = cfg.ttl.latent_dim * cfg.ttl.chunk_compress_factor
-        indexer = try JSONDecoder().decode([Int64].self, from: Data(contentsOf: onnxDir.appendingPathComponent("unicode_indexer.json")))
-
-        try check(api.CreateEnv(ORT_LOGGING_LEVEL_ERROR, "tts", &env))
-        var opts: OpaquePointer?
-        try check(api.CreateSessionOptions(&opts))
-        defer { api.ReleaseSessionOptions(opts) }
-        try check(api.SetIntraOpNumThreads(opts, Int32(threads)))
-        try check(api.SetInterOpNumThreads(opts, 1))
-        try check(api.SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL))
-        func load(_ name: String) throws -> OpaquePointer? {
-            var s: OpaquePointer?
-            let path = onnxDir.appendingPathComponent(name + ".onnx").path
-            try check(api.CreateSession(env, path, opts, &s))
-            return s
-        }
-        dp = try load("duration_predictor")
-        enc = try load("text_encoder")
-        est = try load("vector_estimator")
-        voc = try load("vocoder")
-        try check(api.CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem))
-        try check(api.GetAllocatorWithDefaultOptions(&alloc))
+    private func controlWorker() throws -> Worker {
+        if let c = control, !c.dead { return c }
+        let w = try Worker()
+        control = w
+        return w
     }
 
-    deinit {
-        for s in [dp, enc, est, voc] where s != nil { api.ReleaseSession(s) }
-        if mem != nil { api.ReleaseMemoryInfo(mem) }
-        if env != nil { api.ReleaseEnv(env) }
-    }
-
-    // MARK: tensors
-
-    private final class Tensor {
-        let value: OpaquePointer?
-        init(_ v: OpaquePointer?) { value = v }
-        deinit { if value != nil { api.ReleaseValue(value) } }
-    }
-
-    private func tensor<T>(_ data: [T], _ shape: [Int64], _ type: ONNXTensorElementDataType) throws -> Tensor {
-        var v: OpaquePointer?
-        try check(api.CreateTensorAsOrtValue(alloc, shape, shape.count, type, &v))
-        let t = Tensor(v)
-        var p: UnsafeMutableRawPointer?
-        try check(api.GetTensorMutableData(v, &p))
-        data.withUnsafeBytes { src in p!.copyMemory(from: src.baseAddress!, byteCount: src.count) }
-        return t
-    }
-
-    private func floats(_ t: Tensor) throws -> ([Float], [Int64]) {
-        var info: OpaquePointer?
-        try check(api.GetTensorTypeAndShape(t.value, &info))
-        defer { api.ReleaseTensorTypeAndShapeInfo(info) }
-        var n = 0
-        try check(api.GetDimensionsCount(info, &n))
-        var dims = [Int64](repeating: 0, count: n)
-        try check(api.GetDimensions(info, &dims, n))
-        var count = 0
-        try check(api.GetTensorShapeElementCount(info, &count))
-        var p: UnsafeMutableRawPointer?
-        try check(api.GetTensorMutableData(t.value, &p))
-        let buf = UnsafeBufferPointer(start: p!.assumingMemoryBound(to: Float.self), count: count)
-        return (Array(buf), dims)
-    }
-
-    private func run(_ session: OpaquePointer?, _ inputs: [(String, Tensor)], _ output: String) throws -> Tensor {
-        let names = inputs.map { strdup($0.0) }
-        defer { names.forEach { free($0) } }
-        var cnames = names.map { UnsafePointer<CChar>($0) }
-        let values: [OpaquePointer?] = inputs.map { $0.1.value }
-        let oname = strdup(output)
-        defer { free(oname) }
-        var onames: [UnsafePointer<CChar>?] = [UnsafePointer(oname)]
-        var out: OpaquePointer?
-        try cnames.withUnsafeMutableBufferPointer { cn in
-            try check(api.Run(session, nil, cn.baseAddress, values, values.count, &onames, 1, &out))
-        }
-        return Tensor(out)
-    }
-
-    // MARK: synthesis
-
-    /// Text ids for one chunk, as UnicodeProcessor builds them.
-    func ids(_ text: String, lang: String) throws -> [Int64] {
-        let l = TextPrep.languages.contains(lang) ? lang : "na"
-        let full = "<\(l)>\(TextPrep.clean(text))</\(l)>"
-        var out = [Int64]()
-        out.reserveCapacity(full.unicodeScalars.count)
-        for s in full.unicodeScalars {
-            let v = Int(s.value)
-            let id = v < indexer.count ? indexer[v] : -1
-            out.append(id < 0 ? 0 : id)
-        }
-        return out
-    }
-
-    /// Unsupported characters (the model has no index for them).
-    func unsupported(_ text: String) -> Set<Character> {
-        var bad = Set<Character>()
-        for ch in Set(text) {
-            for s in TextPrep.clean(String(ch)).unicodeScalars {
-                let v = Int(s.value)
-                if v >= indexer.count || indexer[v] < 0 { bad.insert(ch); break }
+    /// Reads the voices again (at launch, and when the app comes back to the front: a voice may have been
+    /// downloaded in System Settings meanwhile).
+    func loadVoices() {
+        guard let w = try? controlWorker() else { return }
+        w.send(["op": "voices"]) { [weak self] o in
+            if let list = o["voices"] as? [[String: Any]] {
+                let v = list.compactMap { d -> VoiceInfo? in
+                    guard let id = d["id"] as? String, let name = d["name"] as? String, let lang = d["lang"] as? String,
+                          let code = d["code"] as? String else { return nil }
+                    return VoiceInfo(id: id, name: name, lang: lang, code: code, gender: d["gender"] as? Int ?? 0, kind: d["kind"] as? String ?? "")
+                }
+                if v != self?.voices { self?.voices = v; self?.onVoices?() }
             }
+            return true
         }
-        return bad
     }
 
-    /// Length in seconds the model will give this chunk at speed 1 (duration predictor only, cheap).
-    func duration(_ text: String, lang: String, voice: Voice) throws -> Float {
-        let id = try ids(text, lang: lang)
-        let n = Int64(id.count)
-        let t = try tensor(id, [1, n], ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-        let m = try tensor([Float](repeating: 1, count: id.count), [1, 1, n], ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        let s = try tensor(voice.dp, voice.dpShape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        let d = try run(dp, [("text_ids", t), ("style_dp", s), ("text_mask", m)], "duration")
-        return try floats(d).0[0]
+    /// The text step for the whole text: paragraphs with their language, sentences with their place and words.
+    /// Paragraphs arrive as they are ready.
+    func plan(_ text: String, paragraph: @escaping (String?, [[String: Any]]) -> Void, done: @escaping (String?) -> Void) {
+        let w: Worker
+        do { w = try controlWorker() } catch { done("\(error)"); return }
+        w.send(["op": "plan", "text": text, "max": Speech.maxPart]) { o in
+            if let p = o["par"] as? [String: Any] {
+                paragraph(p["lang"] as? String, p["sentences"] as? [[String: Any]] ?? [])
+                return false
+            }
+            done(o["error"] as? String)
+            return true
+        }
     }
 
-    /// Exact number of samples `synthesize` will return for this text at this speed.
-    func length(_ text: String, lang: String, voice: Voice, speed: Float) throws -> Int {
-        let dur = try duration(text, lang: lang, voice: voice) / speed
-        return Int(Double(dur) * Double(sampleRate))
+    /// The voice for each language: the one chosen for it, else the best of the same kind (gender).
+    func pick(langs: [String], chosen: [String: String], gender: Int, done: @escaping ([String: String]) -> Void) {
+        guard let w = try? controlWorker() else { done([:]); return }
+        w.send(["op": "pick", "langs": langs, "voice": chosen, "gender": gender]) { o in
+            done(o["pick"] as? [String: String] ?? [:])
+            return true
+        }
     }
 
-    /// One chunk of text to 44.1 kHz mono samples. `noise` lets a test feed the reference's own noise.
-    func synthesize(_ text: String, lang: String, voice: Voice, steps: Int, speed: Float,
-                    noise: [Float]? = nil, cancelled: () -> Bool = { false }) throws -> [Float] {
-        let id = try ids(text, lang: lang)
-        let n = Int64(id.count)
-        let tIds = try tensor(id, [1, n], ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-        let tMask = try tensor([Float](repeating: 1, count: id.count), [1, 1, n], ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        let tDp = try tensor(voice.dp, voice.dpShape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        let tTtl = try tensor(voice.ttl, voice.ttlShape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+    // MARK: speaking
 
-        let dur = try floats(run(dp, [("text_ids", tIds), ("style_dp", tDp), ("text_mask", tMask)], "duration")).0[0] / speed
-        let emb = try run(enc, [("text_ids", tIds), ("style_ttl", tTtl), ("text_mask", tMask)], "text_emb")
-
-        // core.py: wav_len = dur * sr (float), latent_len = ceil(wav_len / chunk) as int32
-        let wavLen = Int(Double(dur) * Double(sampleRate))
-        let frames = Int((Double(dur) * Double(sampleRate) + Double(chunk) - 1) / Double(chunk))
-        let latentCount = latentChannels * frames
-        var x: [Float]
-        if let noise, noise.count == latentCount {
-            x = noise
-        } else {
-            x = Supertonic.gaussian(latentCount)
-        }
-        let tLatentMask = try tensor([Float](repeating: 1, count: frames), [1, 1, Int64(frames)], ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        let tTotal = try tensor([Float(steps)], [1], ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        var xt = try tensor(x, [1, Int64(latentChannels), Int64(frames)], ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        for step in 0..<steps {
-            if cancelled() { throw CancellationError() }
-            let tStep = try tensor([Float(step)], [1], ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-            xt = try run(est, [("noisy_latent", xt), ("text_emb", emb), ("style_ttl", tTtl), ("text_mask", tMask),
-                               ("latent_mask", tLatentMask), ("current_step", tStep), ("total_step", tTotal)],
-                         "denoised_latent")
-        }
-        if cancelled() { throw CancellationError() }
-        var wav = try floats(run(voc, [("latent", xt)], "wav_tts")).0
-        if wav.count > wavLen { wav.removeLast(wav.count - wavLen) }
-        x = []
-        return wav
+    /// A free speaker, started if needed; nil when `max` are busy.
+    func speaker(max: Int) -> Worker? {
+        speakers.removeAll { $0.dead }
+        if let w = speakers.first(where: { $0.busy == 0 }) { return w }
+        guard speakers.count < Swift.min(max, Self.limit) else { return nil }
+        guard let w = try? Worker() else { return nil }
+        speakers.append(w)
+        return w
     }
 
-    static func gaussian(_ n: Int) -> [Float] {
-        var g = SystemRandomNumberGenerator()
-        var out = [Float](repeating: 0, count: n)
-        var i = 0
-        while i < n {
-            let u1 = Double.random(in: Double.leastNonzeroMagnitude..<1, using: &g)
-            let u2 = Double.random(in: 0..<1, using: &g)
-            let r = (-2 * log(u1)).squareRoot()
-            out[i] = Float(r * cos(2 * .pi * u2))
-            if i + 1 < n { out[i + 1] = Float(r * sin(2 * .pi * u2)) }
-            i += 2
+    /// Speaks into a CAF file that grows while the voice speaks; `done` gets nil or the error.
+    func render(on w: Worker, voice: String, speed: Double, text: String, path: String, done: @escaping (String?) -> Void) {
+        w.send(["op": "render", "voice": voice, "speed": speed, "text": text, "path": path]) { o in
+            done(o["error"] as? String)
+            return true
         }
-        return out
+    }
+
+    /// Stops a speaker in the middle of a sentence nobody needs any more; a new one takes its place when asked for.
+    func abandon(_ w: Worker) {
+        w.kill()
+        speakers.removeAll { $0 === w }
+    }
+
+    /// One speaker warmed with a voice before anything is asked, so the first sentence sounds at once.
+    func warm(voice: String) {
+        guard let w = speaker(max: 1) else { return }
+        let path = NSTemporaryDirectory() + "tts-\(UUID().uuidString).caf"
+        render(on: w, voice: voice, speed: 1, text: ".", path: path) { _ in try? FileManager.default.removeItem(atPath: path) }
+    }
+
+    private func sweep() {
+        let idle = speakers.filter { $0.busy == 0 && Date().timeIntervalSince($0.lastUsed) > 60 }
+        for w in idle.dropFirst(speakers.count == idle.count ? 1 : 0) { abandon(w) }
+    }
+
+    func shutDown() {
+        for w in speakers { w.kill() }
+        control?.kill()
+        speakers = []; control = nil
+    }
+}
+
+/// How many speakers suit this Mac: its performance cores.
+enum Workers {
+    static var performanceCores: Int {
+        var n: Int32 = 0; var size = MemoryLayout<Int32>.size
+        if sysctlbyname("hw.perflevel0.physicalcpu", &n, &size, nil, 0) == 0, n > 0 { return Int(n) }
+        return max(1, ProcessInfo.processInfo.activeProcessorCount / 2)
     }
 }
