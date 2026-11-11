@@ -34,7 +34,7 @@ Space plays and pauses, the Left and Right arrows jump 15 seconds, when the curs
 
 ## For advanced users and language models
 
-TTS speaks with Apple’s own voices. Siri’s are the clearest voices on a Mac: plainly synthetic, never mumbling. Speech starts in about half a second and is made on the Mac itself, so the app works without internet and suits confidential text: nothing is sent anywhere. Checked while Siri spoke a long text: Apple’s speech processes opened no network connection. The only network use of the app is its daily check for updates.
+TTS speaks with Apple’s own voices. Speech starts in about half a second and is made on the Mac itself, so the app works without internet and sends nothing anywhere. Checked while Siri spoke a long text: Apple’s speech processes opened no network connection. The only network use of the app is its daily check for updates.
 
 ### How it works
 
@@ -55,7 +55,7 @@ On a MacBook Pro with M3 Pro, macOS 27.2 (2026-11-10): the first sound 0.55 s af
 
 ### Questions
 
-#### Does my text leave the Mac?
+#### Does the text leave the Mac?
 
 No. The voices speak on the Mac itself; the app goes online only to check for updates.
 
@@ -81,7 +81,7 @@ They came from the downloaded Supertonic 3 model, which read numbers and long te
 
 ### Updates
 
-Once a day the app reads the feed of its latest GitHub release (`appcast.xml`) through Sparkle, the usual open source updater for Mac apps. Nothing about the Mac is sent. When a newer version is out, a window shows it with Install Update, Remind Me Later and Skip This Version; nothing is downloaded before Install Update. Check for Updates in the app menu checks at once.
+Once a day the app reads the feed of its latest GitHub release (`appcast.xml`) through Sparkle. Nothing about the Mac is sent. When a newer version is out, a window shows it with Install Update, Remind Me Later and Skip This Version; nothing is downloaded before Install Update. Check for Updates in the app menu checks at once.
 
 The feed and the disk image are signed with an EdDSA key, and Sparkle installs only an app that carries the same Developer ID signature.
 
