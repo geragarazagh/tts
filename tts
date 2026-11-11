@@ -135,27 +135,59 @@ function listVoices(code) {
 
 // ---------------------------------------------------------------- language of a paragraph
 
-var UKW = /(^|[^\p{L}])(це|та|що|як|але|дуже|якщо|коли|вони|його|її|від|для|при|між|або|ще|вже|також|тому|лише|навіть|було|буде|має|можна|який|яка|яке|які)(?![\p{L}])/giu;
+var UKW = /(^|[^\p{L}])(це|та|що|як|але|дуже|якщо|коли|вони|його|її|від|для|при|між|або|ще|вже|також|лише|навіть|було|буде|має|можна|який|яка|яке|які)(?![\p{L}])/giu;
 var RUW = /(^|[^\p{L}])(это|что|как|но|если|когда|они|только|уже|очень|его|её|для|при|между|или|ещё|также|поэтому|лишь|даже|было|будет|есть|можно|который|которая|которое|которые)(?![\p{L}])/giu;
+var BGW = /(^|[^\p{L}])(са|се|във|със|това|тези|този|тази|които|която|който|което|че|ще|беше|като|той|тя|също|обаче|няма|има|още|след|според|днес)(?![\p{L}])/giu;
+var CYRILLIC = { ru: 1, uk: 1, bg: 1, kk: 1 };   // the Cyrillic languages macOS has a voice for
+function cyrillic(par) {
+  var cyr = (par.match(/[Ѐ-ӿ]/g) || []).length, lat = (par.match(/[A-Za-z]/g) || []).length;
+  return cyr > 0 && cyr >= lat * 0.5;
+}
+// Russian, Ukrainian, Bulgarian or Kazakh by letters and common words, or null when nothing tells.
+// Apple's recognizer is not asked: on a short line it guesses (2026-11-10: «Привет», «Москва», «Война и мир»
+// came back Bulgarian, «Биография» Kazakh) and it mixes the languages up in long ones (a Bulgarian article
+// came back Russian, Macedonian Kazakh). Measured 2026-11-11 on 6 564 Cyrillic paragraphs of Wikipedia
+// articles in these four languages, a list of book titles and an old-spelling Russian text: 1 492 had read
+// with a wrong voice, 56 do now. A letter that several of these languages write (ы, і) does not decide a
+// line of fewer than four words by itself (a Kazakh «Тарихы», a Ukrainian heading among Russian lines);
+// `alone` (nothing else in the text tells) lets it.
+function cyrLang(par, alone) {
+  var n = function (re) { return (par.match(re) || []).length; };
+  var kk = n(/[әғқңөұүһӘҒҚҢӨҰҮҺ]/g), be = n(/[ўЎ]/g);
+  // Kazakh writes ы and і too; its own letters come in every word or two
+  if (kk && kk * 30 >= n(/[Ѐ-ӿ]/g)) return 'kk';
+  var shared = alone || (par.match(/\p{L}+/gu) || []).length >= 4;
+  var s = {
+    // ы э ё; the old spelling's ѣ ѳ ѵ and ъ at the end of a word
+    ru: n(/[эёЭЁѣѢѳѲѵѴ]/g) * 2 + (shared ? n(/[ыЫ]/g) * 2 : 0) + n(/[ъЪ](?![\p{L}])/gu) * 2 + n(RUW),
+    uk: n(/[ґєїҐЄЇ]/g) * 2 + (shared && !kk && !be ? n(/[іІ]/g) * 2 : 0) + n(UKW),
+    // ъ before a consonant (България, със, път): Russian writes ъ only before е ё ю я; old ѫ ѭ
+    bg: n(/[ѫѭѪѬ]/g) * 2 + n(/[ъЪ](?=[бвгджзйклмнпрстфхцчшщБВГДЖЗЙКЛМНПРСТФХЦЧШЩ])/g) * 2 + n(BGW),
+    kk: kk * 2
+  };
+  var top = null, max = 0;
+  ['ru', 'uk', 'bg', 'kk'].forEach(function (l) { if (s[l] > max) { max = s[l]; top = l; } });
+  return top;
+}
+// A Cyrillic text with nothing in it to tell the language by («Привет»): the first of these languages in the
+// Mac's own list of languages (System Settings › General › Language & Region), else Russian.
+var cyrDefaultLang = null;
+function cyrDefault() {
+  if (cyrDefaultLang) return cyrDefaultLang;
+  var pref = ObjC.deepUnwrap($.NSLocale.preferredLanguages) || [];
+  for (var i = 0; i < pref.length; i++) {
+    var c = String(pref[i]).split('-')[0];
+    if (CYRILLIC[c]) return (cyrDefaultLang = c);
+  }
+  return (cyrDefaultLang = 'ru');
+}
 function detect(par) {
   var letters = (par.match(/\p{L}/gu) || []).length;
   if (!letters) return null;
-  var cyr = (par.match(/[Ѐ-ӿ]/g) || []).length, lat = (par.match(/[A-Za-z]/g) || []).length;
-  if (cyr && cyr >= lat * 0.5) {
-    // Russian text with English words stays Russian: one voice per paragraph (the author's Spoken Content
-    // rule: one Siri voice for ru and en, language detection off)
-    var uk = (par.match(/[іїєґІЇЄҐ]/g) || []).length * 2 + (par.match(UKW) || []).length;
-    var ru = (par.match(/[ыэъёЫЭЪЁ]/g) || []).length * 2 + (par.match(RUW) || []).length;
-    if (uk > ru) return 'uk';
-    if (ru > 0 || !/[ґєії]/i.test(par)) {
-      if (ru > 0) return 'ru';
-    }
-    var r = $.NLLanguageRecognizer.alloc.init;
-    r.languageConstraints = $(['ru', 'uk', 'bg', 'sr', 'be', 'kk', 'mk']);
-    r.processString(par);
-    var l = r.dominantLanguage;
-    return l.isNil() ? 'ru' : l.js;
-  }
+  var lat = (par.match(/[A-Za-z]/g) || []).length;
+  // Russian text with English words stays Russian: one voice per paragraph (the author's Spoken Content
+  // rule: one Siri voice for ru and en, language detection off)
+  if (cyrillic(par)) return cyrLang(par);
   // a short Latin line inside a Russian text (a name, a title) keeps the voice it is among
   if (lat >= letters * 0.8 && (par.match(/\p{L}+/gu) || []).length < 4) return null;
   // A real sentence in any language comes back at 0.99 or more; lines of names, brands and numbers
@@ -958,12 +990,22 @@ function sentences(par, max) {
 // say. opts.max: the longest piece a voice gets at once. Calls each(paragraph) as it goes, so a
 // long text starts sounding before the rest is prepared.
 function plan(text, lang, max, each) {
-  var last = null, pars = paragraphs(text);
+  var last = null, lastCyr = null, pars = paragraphs(text);
   pars.forEach(function (p, k) {
-    var l = lang != 'auto' ? lang : (detect(p.text) || last);
+    var l = lang != 'auto' ? lang : detect(p.text), cy = cyrillic(p.text), j;
+    // a Cyrillic line with nothing to tell its language by (a heading, a title, a name) takes the language of
+    // the Cyrillic text before it, else after it; a whole text of such lines: its own shared letters, else the
+    // Mac's language
+    if (!l && cy) {
+      l = lastCyr;
+      for (j = k + 1; !l && j < pars.length; j++) if (cyrillic(pars[j].text)) l = detect(pars[j].text);
+      if (!l) l = cyrLang(p.text, true) || cyrDefault();
+    }
+    if (!l) l = last;
     // nothing to tell the first paragraphs by (a number, a date): the first language found later
-    for (var j = k + 1; !l && j < pars.length; j++) l = detect(pars[j].text);
+    for (j = k + 1; !l && j < pars.length; j++) l = detect(pars[j].text);
     if (l) last = l;
+    if (CYRILLIC[l]) lastCyr = l;
     var ss = sentences(p, max).map(function (r) {
       return { from: p.map[r[0]], to: p.map[r[1] - 1] + 1, text: prepare(p.text.slice(r[0], r[1]), l || 'ru') };
     }).filter(function (x) { return /[\p{L}\p{N}]/u.test(x.text); });

@@ -3,7 +3,7 @@
 set -e
 cd "${0:A:h}"
 # It changes per release, not per build.
-version=0.4 min=13.0 id=com.geragaraza.tts app=TTS.app
+version=0.5 min=13.0 id=com.geragaraza.tts app=TTS.app
 tmp=$(mktemp -d); trap 'rm -rf $tmp' EXIT
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
