@@ -10,7 +10,7 @@ Apple silicon, macOS 13 or later. Interface in English, Ukrainian and Russian. S
 
 ## Install
 
-Download `TTS.dmg` from [Releases](https://github.com/geragarazagh/tts/releases/latest), open it and drag `TTS.app` to Applications. Later versions arrive through Check for Updates.
+**Mac** (Apple silicon, macOS 13 or later): download [`TTS.dmg`](https://github.com/geragarazagh/tts/releases/latest/download/TTS.dmg) (1.7 MB), open it and drag `TTS.app` to Applications. Later versions arrive through Check for Updates.
 
 Or with [Homebrew](https://brew.sh):
 
