@@ -873,7 +873,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
         sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
         let label = NSTextField(labelWithString: L("Saving MP3…"))
         let cancel = NSButton(title: L("Cancel"), target: nil, action: nil)
-        cancel.keyEquivalent = "\u{1b}"
+        cancel.keyEquivalent = "\u{1b}"   // nosemgrep (the Escape key as the Cancel button's shortcut, not a secret)
         bar.isIndeterminate = false; bar.minValue = 0; bar.maxValue = 1; bar.style = .bar
         let v = sheet.contentView!
         for x in [label, bar, cancel] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
