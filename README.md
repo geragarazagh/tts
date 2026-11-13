@@ -47,7 +47,11 @@ TTS speaks with Apple’s own voices. Speech starts in about half a second and i
 - Voice samples are spoken on the Mac when the button is pressed: the app carries no recordings of Apple’s voices. In Russian the voices read Woland from Bulgakov’s “The Master and Margarita”, in Ukrainian the start of Kotliarevsky’s “Eneida”, in English Shakespeare’s seven ages of man; in other languages the start of the text.
 - While listening, the sound lives as 16-bit samples in a temporary file that has no name on disk (deleted the moment it is opened), so nothing is left behind.
 - MP3: LAME 4.0 (LGPL), mono, 48 kHz, VBR quality 2, about 48 MB an hour, with the LAME tag so players show the exact length; its comment says the speech is synthetic.
-- The script is also a command line tool: `/Applications/TTS.app/Contents/Resources/tts -h` (a text file to MP3, M4A, WAV or AIFF, voice, speed, `-t` prints the text as it will be read, `-L` lists the voices).
+- The script is also a command line tool (a text file to MP3, M4A, WAV or AIFF, voice, speed, `-t` prints the text as it will be read, `-L` lists the voices); its help:
+
+  ```sh
+  /Applications/TTS.app/Contents/Resources/tts -h
+  ```
 
 Apple’s voices are part of macOS, and its licence allows the speech they make for personal, non-commercial use.
 
@@ -91,9 +95,19 @@ The feed and the disk image are signed with an EdDSA key, and Sparkle installs o
 
 Settings (the voices chosen per language, the speed, the text size) and the time of the last update check are in the defaults of `com.geragaraza.tts`. Nothing else is kept: no text, no history, no saved window state.
 
-To remove TTS: quit it, move `TTS.app` to the Trash and run `defaults delete com.geragaraza.tts`. Siri voices stay in macOS; System Settings removes them.
+To remove TTS: quit it, move `TTS.app` to the Trash and clear its settings with this command:
 
-Installed with Homebrew, `brew uninstall --zap tts` quits it and removes the app and its settings.
+```sh
+defaults delete com.geragaraza.tts
+```
+
+Installed with Homebrew, this command quits it and removes the app and its settings:
+
+```sh
+brew uninstall --zap tts
+```
+
+Either way, Siri voices stay in macOS; System Settings removes them.
 
 ### Details
 
