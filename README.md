@@ -1,12 +1,10 @@
-English · [Українська](README_UA.md) · [Русский](README_RU.md)
-
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/icon-dark.png"><img src="docs/icon.png" width="128" alt="TTS icon"></picture>
 
 # TTS (Text to Speech) for Mac
 
 Free, open source text to speech app for macOS. A text pasted into the window or a file dropped on it is read aloud with the voices of macOS, Siri’s included, and the speech can be saved as an MP3.
 
-Apple silicon, macOS 13 or later. Interface in English, Ukrainian and Russian. Signed with a Developer ID and notarized by Apple.
+Apple silicon, macOS 13 or later. Signed with a Developer ID and notarized by Apple.
 
 ![TTS in use: page 2 of Lincoln's Gettysburg Address in his own hand (the Bliss copy) in Preview, and TTS reading the speech with Siri's Voice 1, the sentence “The world will little note, nor long remember what we say here” highlighted, dark appearance](docs/scene.webp)
 
@@ -117,7 +115,6 @@ Either way, Siri voices stay in macOS; System Settings removes them.
 - Requires: Apple silicon, macOS 13 or later.
 - Permissions: none. Network: to check for updates.
 - Signed with a Developer ID and notarized by Apple.
-- Interface: English, Ukrainian, Russian, from the language of macOS.
 - Code: Swift with AppKit, about 2,500 lines, the script `tts` in JavaScript for Automation, about 1,300 lines, LAME, and Sparkle for updates.
 - License: MIT.
 
