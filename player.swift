@@ -164,7 +164,7 @@ import AVFoundation
             if cursor.frame < have {
                 n = s.read(p, at: cursor.frame, count: min(block, have - cursor.frame), into: buf.floatChannelData![0])
                 if n <= 0 { break }
-            } else if s.isDone(p) {
+            } else if s.isDone(p) && s.gapKnown(after: p) {
                 let end = have + s.gap(after: p)
                 if cursor.frame >= end { cursor = (p + 1, 0); continue }
                 n = min(block, end - cursor.frame)
@@ -188,7 +188,7 @@ import AVFoundation
             if s.isFailed(p) { part = p + 1; frame = 0; startNode(); onChange?(); return }
             let have = s.available(p)
             if s.isDone(p) || have - frame >= Speech.rate / 10 {   // Siri hands its buffers over far faster than real time
-                if s.isDone(p) && frame >= have + s.gap(after: p) { part = p + 1; frame = 0 }
+                if s.isDone(p) && s.gapKnown(after: p) && frame >= have + s.gap(after: p) { part = p + 1; frame = 0 }
                 startNode()
             }
             onChange?()

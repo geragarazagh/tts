@@ -551,6 +551,57 @@ function guessGender(lang, word, n, c) {
   return 'm';
 }
 
+// The counted noun before the number, in the genitive plural: «чисток было 42», «книг у меня 21»,
+// «книжок у мене 21» (2026-11-15: read «сорок два», the gender was taken only from a noun after).
+// A genitive plural ending can't tell gender (чисток f, урок m nom, мест n; линий f, заданий n),
+// so only listed forms count; masculine is the default anyway, so only feminine and neuter are
+// listed, plus every -остей but гостей (nouns in -ость, -ість are feminine). Words that are also
+// other forms (тем, сел, пар, суток, видео) are left out on purpose.
+function genders(f, n) { var o = {}; f.split(' ').forEach(function (w) { o[w] = 'f'; }); n.split(' ').forEach(function (w) { o[w] = 'n'; }); return o; }
+var COUNTED = {
+  ru: [genders(
+    'книг книжек минут секунд недель страниц чисток стирок штук тысяч сотен копеек гривен строк строчек задач ошибок попыток ' +
+    'ссылок статей новостей вещей ночей частей долей комнат квартир машин игр песен серий глав версий программ функций школ ' +
+    'единиц точек звёзд звезд рук ног ламп монет карт карточек фотографий картинок заметок записей вакансий заявок покупок ' +
+    'поездок сделок ставок подписок таблеток капсул порций чашек бутылок банок пачек ложек сигарет тренировок пробежек улиц ' +
+    'станций остановок смен линий позиций марок медалей побед оценок лекций сессий тетрадей ручек групп команд стран компаний ' +
+    'фирм организаций семей женщин девушек девочек сестёр сестер дочерей бабушек кошек собак коров лошадей птиц рыб категорий ' +
+    'историй операций акций опций секций коллекций публикаций транзакций итераций клеток кнопок вкладок папок иконок библиотек ' +
+    'полок дверей площадей областей сетей таблиц формул схем систем моделей целей мыслей идей болезней профессий миль тонн ' +
+    'калорий волн ступенек',
+    'мест слов писем окон блюд дел лиц сёл озёр озер морей полей чисел колёс колес кресел зёрен очков сердец вёдер ведер ' +
+    'сообщений заданий упражнений изменений решений предложений приложений зданий мнений объявлений уведомлений обновлений ' +
+    'упоминаний действий событий занятий правил средств свойств качеств устройств государств предприятий яиц яблок'),
+    /^(?!гостей$).*остей$/],
+  uk: [genders(
+    'книжок книг хвилин секунд годин сторінок штук тисяч сотень копійок гривень помилок спроб задач статей новин речей ночей ' +
+    'частин кімнат квартир машин пісень серій версій функцій чисток чашок пляшок сигарет таблеток станцій зупинок ліній позицій ' +
+    'лекцій груп команд країн компаній жінок сестер доньок кішок собак корів риб зірок монет карток фотографій нотаток заявок ' +
+    'покупок поїздок угод ставок підписок діб змін осіб мов порцій ложок банок пачок оцінок перемог медалей шкіл програм ігор ' +
+    'подій дій справ вправ категорій історій операцій акцій вулиць ідей моделей цілей думок систем таблиць родин тонн миль ' +
+    'калорій хвиль кнопок вкладок папок бібліотек полиць дверей областей мереж страв',
+    'місць слів вікон яблук яєць повідомлень завдань рішень речень зображень оновлень сповіщень сіл озер морів полів чисел ' +
+    'крісел очок облич сердець тренувань занять правил почуттів підприємств видань змагань питань оголошень дерев'),
+    /^(?!гостей$).*остей$/]
+};
+// a preposition right after the number is not its noun («рублей потратил 1 за день»: was «одна»,
+// from the ending of «за»); «с начала» in PREP_CASE is two words, «начала» is not one of them
+var PREPS = {};
+['ru', 'uk'].forEach(function (lang) {
+  var o = {};
+  PREP_CASE[lang].forEach(function (x) { for (var w in x[1]) o[w] = 1; });
+  if (lang == 'ru') { o['с'] = o['со'] = o['по'] = 1; delete o['начала']; }
+  PREPS[lang] = o;
+});
+// words before the number that leave it free to agree with a noun before: «чисток было около 40»
+var APPROX = { ru: caseSet('около больше меньше более менее свыше порядка'), uk: caseSet('близько понад більше менше') };
+var PARTITIVE = { ru: caseSet('из'), uk: caseSet('з із зі') };
+// a noun right before the number that names it rather than counts it: «Разбор сделок, часть 2»
+var LABEL = {
+  ru: caseSet('часть глава урок серия сезон эпизод выпуск номер том страница стр пункт раздел шаг этап уровень вариант версия тур раунд день неделя класс курс модуль лекция задача задание упражнение пример рисунок таблица схема параграф статья строка'),
+  uk: caseSet('частина розділ урок серія сезон епізод випуск номер том сторінка стор пункт крок етап рівень варіант версія тур раунд день тиждень клас курс модуль лекція задача завдання вправа приклад рисунок малюнок таблиця схема параграф стаття рядок')
+};
+
 // ---------------------------------------------------------------- the normaliser
 
 var ROMAN = /^(M{0,3})(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/;
@@ -639,6 +690,26 @@ function normalizeSlav(par, lang) {
     var r = [];
     for (k--; k >= 0 && r.length < n; k--) { if (/^[.!?…:;]$/.test(t[k])) break; if (isWord(k)) r.push(t[k].toLowerCase()); }
     return r;
+  };
+  // the gender of a listed genitive plural noun up to five words before the number k in its clause
+  // («чисток было 42», «из 5 книг мне понравились 2»); null when there is none or it belongs to
+  // something else: a preposition before it («из-за ошибок пропало 2»; partitive из / з allowed), or
+  // another number counting it («5 книг стоили 21»)
+  var countedBack = function (k) {
+    var C = COUNTED[lang];
+    for (var m = 0, j = k - 1; j >= 0 && m < 5; j--) {
+      if (isNum(j) || /^[.!?…:;,()\[\]]$/.test(t[j])) return null;
+      if (!isWord(j)) continue;
+      var w = t[j].toLowerCase(), g = C[0][w] || (C[1].test(w) ? 'f' : null);
+      if (!g) { m++; continue; }
+      var p = j - 1;
+      while (p >= 0 && isSp(p)) p--;
+      if (isNum(p)) { p--; while (p >= 0 && isSp(p)) p--; return isWord(p) && PARTITIVE[lang][t[p].toLowerCase()] ? g : null; }
+      if (p >= 0 && t[p] == '-') return null;                      // из-за, из-под
+      if (isWord(p) && PREPS[lang][t[p].toLowerCase()] && !PARTITIVE[lang][t[p].toLowerCase()]) return null;
+      return g;
+    }
+    return null;
   };
   var wordsAhead = function (k, n) {
     var r = [];
@@ -866,7 +937,16 @@ function normalizeSlav(par, lang) {
     // plain or decimal number, maybe with a unit
     var c1 = c0, gnd;
     if (unit) gnd = unit[0];
-    else gnd = guessGender(lang, noun, n, c1);
+    else if (noun && !PREPS[lang][nounL]) gnd = guessGender(lang, noun, n, c1);
+    else {     // no noun after: one before agrees, when the number is not governed by a preposition
+      // not a count: a label («часть 2»), a list marker («личностей 1) Отличный…», which clean() has
+      // made «1, Отличный»), unless a bracket opened before it in the sentence
+      var pw0 = prevWord(start);
+      var marker = (t[j2] == ')' || (t[j2] == ',' && /^\p{Lu}/u.test(t[skipSp(j2 + 1)] || ''))) &&
+        !/\(/.test(t.slice(0, start).join('').split(/[.!?…]/).pop());
+      var free = (pcRaw == null || forceGen || APPROX[lang][pw0]) && !LABEL[lang][pw0] && !marker;
+      gnd = (free && countedBack(start)) || 'm';
+    }
     if (frac !== null) {
       words = decimal(lang, n, frac, c1);
     } else if (str.length > 1 && str[0] == '0') {
@@ -1014,6 +1094,23 @@ function plan(text, lang, max, each) {
 }
 var PART = 1200;   // characters a job: ~10 s of speech; small enough to spread over the workers
 
+// What follows a piece of a paragraph: 'par' after its last, 'sent' after a sentence end, 'cut' after a sentence
+// cut inside (one longer than the limit). The command joins parts, the app sentences: the same three joins.
+var END = /[.!?…]["»”)]*$/;
+function joinOf(text, last) { return last ? 'par' : END.test(text) ? 'sent' : 'cut'; }
+// A paragraph's sentences joined into parts of up to `max` characters: fewer, longer jobs for the workers.
+// inner: sentence ends inside a part (where the voice makes its own pause, measured in pauseOf())
+function group(sentences, max) {
+  var s = [], cur = null;
+  sentences.forEach(function (x) {
+    if (cur && cur.text.length + x.text.length + 1 > max) { s.push(cur); cur = null; }
+    if (cur) { cur.inner += END.test(cur.text) ? 1 : 0; cur.text += ' ' + x.text; } else cur = { text: x.text, inner: 0 };
+  });
+  if (cur) s.push(cur);
+  s.forEach(function (x, m) { x.join = joinOf(x.text, m == s.length - 1); });
+  return s;
+}
+
 // ---------------------------------------------------------------- speech
 
 // speed (1 = the Mac's normal) -> AVSpeechUtterance.rate; measured 2026-11-10 on Siri Yelena,
@@ -1089,11 +1186,17 @@ function worker(jobsPath) {
 // request's id. The app keeps a few of these running: the voices, the text step and the speech are
 // this file's, so the app and the command read a text the same way.
 //   {"op":"voices"}                                    -> {"voices":[{id,name,lang,code,gender,kind}]}
-//   {"op":"plan","text","lang","max","voice","gender"} -> one {"par":{lang,voice,sentences:[{from,to,text}]}}
-//                                                         a paragraph, then {"done":true}
+//   {"op":"plan","text","lang","max","voice","gender"} -> one {"par":{lang,voice,sentences:[{from,to,text,join}]}}
+//                                                         a paragraph, then {"done":true}; join: what follows
+//                                                         the sentence ('par', 'sent', 'cut'; joinOf())
 //   {"op":"pick","langs":[...],"voice","gender"}       -> {"pick":{lang: id}}
 //   {"op":"render","voice","speed","text","path"}      -> {"done":true} or {"error":"..."}; the CAF at path
 //                                                         grows while the voice speaks
+//   {"op":"joins","voice","speed","texts":[[...]],"dir"} -> {"joins":{sent,par,cut,measured:false}} at once (the
+//                                                         voice's usual pauses), then {"joins":{...,measured:true}}
+//                                                         measured on these paragraphs' sentences as the command measures
+//                                                         its parts (gapOf(), pauseOf()); frames at 48 kHz;
+//                                                         the parts spoken in dir, removed after
 // voice: {lang: id} chosen in the app; gender 1 or 2 for the languages without a choice; speed as
 // for -r (1 = the Mac's normal).
 function voiceChooser(named, gender) {
@@ -1130,7 +1233,8 @@ function serve() {
           var pick = voiceChooser(q.voice || {}, q.gender || 2);
           plan(q.text, q.lang || 'auto', q.max || 400, function (p) {
             var v = pick(p.lang);
-            send({ id: q.id, par: { lang: p.lang, voice: v ? v.id : '', sentences: p.sentences } });
+            var ss = p.sentences.map(function (x, k) { return { from: x.from, to: x.to, text: x.text, join: joinOf(x.text, k == p.sentences.length - 1) }; });
+            send({ id: q.id, par: { lang: p.lang, voice: v ? v.id : '', sentences: ss } });
           });
           send({ id: q.id, done: true });
         } else if (q.op == 'pick') {
@@ -1140,6 +1244,10 @@ function serve() {
         } else if (q.op == 'render') {
           var e = renderCaf(q.voice, rateFor(q.speed || 1), q.pitch || 1, q.text, q.path);
           send(e ? { id: q.id, error: e } : { id: q.id, done: true });
+        } else if (q.op == 'joins') {
+          var sp = q.speed || 1, gaps = function (o, m) { return { sent: gapOf(o, 'sent'), par: gapOf(o, 'par'), cut: gapOf(o, 'cut'), measured: m }; };
+          send({ id: q.id, joins: gaps(pauseOf([], q.voice, sp), false), last: false });
+          send({ id: q.id, joins: joinsOf(q.voice, sp, q.texts || [], q.dir) || gaps(pauseOf([], q.voice, sp), false) });
         } else if (q.op == 'quit') {
           return;
         } else send({ id: q.id, error: 'unknown op ' + q.op });
@@ -1164,15 +1272,108 @@ function pcmOf(path) {          // the data chunk of a WAV
   }
   return null;
 }
-function assemble(parts, wavOut) {     // parts: [{wav, gapAfter}]
+// Joining the parts so that no join can be heard (2026-11-15). A voice given the whole text at once pauses
+// between sentences, and makes the same pause at a paragraph break (measured: Siri Yelena at 1.2x, 0.29 s at
+// paragraph breaks, 0.30-0.335 s between sentences). The pause belongs to the voice and the speed: Siri
+// Yelena and Aleksei ~0.37 s / speed, Simone (en) ~0.6 s at 1.2x, Lesya ~0.18 s at 1.2x. So the pause is
+// measured on the parts themselves: the longest silences inside a part are its sentence ends; their
+// median, per voice, is put at every join inside a paragraph; a paragraph break gets the long end of the same
+// pauses (the 95th percentile, Siri's own longest sentence pause, ~0.4 s at 1.2x): a paragraph should sound
+// like a full breath, never longer than the voice itself ever pauses. Each part is cut to its sound (a 5 ms window above -50 dBFS)
+// plus 10 ms that fade in and out, so the voice's own lead and tail silence don't add to the pause.
+var SR = 48000, WIN = 240, EDGE = 480;                       // 5 ms windows, 10 ms faded edge
+var QUIET = Math.pow(10, -50 / 10) * 32768 * 32768 * WIN;   // a window's sum of squares at -50 dBFS
+var CUT_X = 0.6;               // a part cut inside a sentence (one longer than PART): about a comma's pause
+function pcm16(d, from, n) {    // n samples of a 16-bit PCM NSData from sample `from`
+  var s = latin1(d.subdataWithRange($.NSMakeRange(from * 2, n * 2))), a = new Int16Array(n);
+  for (var i = 0; i < n; i++) a[i] = s.charCodeAt(2 * i) | s.charCodeAt(2 * i + 1) << 8;
+  return a;
+}
+function loud(a) {              // one flag per 5 ms window: sound above -50 dBFS
+  var n = Math.floor(a.length / WIN), f = new Uint8Array(n);
+  for (var w = 0; w < n; w++) { var e = 0; for (var i = w * WIN, j = i + WIN; i < j; i++) e += a[i] * a[i]; f[w] = e > QUIET ? 1 : 0; }
+  return f;
+}
+// silences of a part longer than 60 ms, not at its edges, in seconds
+function silences(d) {
+  var f = loud(pcm16(d, 0, Math.floor(Number(d.length) / 2))), out = [], w = 0;
+  while (w < f.length && !f[w]) w++;
+  for (var k = w; k < f.length; k++) if (!f[k]) {
+    var j = k; while (j < f.length && !f[j]) j++;
+    if (j < f.length && j - k >= 12) out.push((j - k) * WIN / SR);
+    k = j;
+  }
+  return out;
+}
+// the pause a voice makes between two sentences, from up to 8 of its parts with sentence ends inside
+function pauseOf(parts, voice, speed) {
+  var pool = [];
+  parts.filter(function (p) { return p.voice == voice && p.inner > 0; }).slice(0, 8).forEach(function (p) {
+    var d = pcmOf(p.wav); if (!d) return;
+    pool = pool.concat(silences(d).sort(function (x, y) { return y - x; }).slice(0, p.inner));
+  });
+  if (!pool.length) return { mid: 0.37 / speed, top: 0.48 / speed };   // Siri Yelena and Aleksei, measured 2026-11-15
+  pool.sort(function (x, y) { return x - y; });
+  // top never under mid: with two silences the 95th percentile by index would be the shorter one (fixed 2026-11-15)
+  var mid = pool[Math.floor(pool.length / 2)];
+  return { mid: mid, top: Math.max(mid, pool[Math.floor((pool.length - 1) * 0.95)]) };
+}
+// the silence put after a part, in 48 kHz frames: the voice's pause minus the two 10 ms faded edges around it
+function gapOf(q, join) {
+  var g = (join == 'par' ? q.top : join == 'cut' ? q.mid * CUT_X : q.mid) - 2 * EDGE / SR;
+  return Math.max(0, Math.round(g * SR));
+}
+function faded(a, up) {
+  var s = '';
+  for (var i = 0; i < a.length; i++) {
+    var g = (up ? i : a.length - 1 - i) / a.length, v = Math.round(a[i] * g * g) & 0xffff;
+    s += String.fromCharCode(v & 255, v >> 8);
+  }
+  return $(s).dataUsingEncoding($.NSISOLatin1StringEncoding);
+}
+// For the app, which speaks each sentence alone and so hears no pause of the voice's own: a few of its
+// sentences grouped and spoken as the command's parts are, measured by pauseOf(). null: nothing to measure.
+function joinsOf(voice, speed, texts, dir) {
+  var parts = [];   // texts: paragraphs, each a list of sentences; a part never spans two, as in the command
+  texts.forEach(function (ss) { parts = parts.concat(group(ss.map(function (t) { return { text: t }; }), PART)); });
+  parts = parts.filter(function (x) { return x.inner > 0; }).slice(0, 8);
+  if (!parts.length) return null;
+  // dir: the app's, so it can remove it when it ends this worker mid-way
+  dir = dir || $.NSTemporaryDirectory().js + 'tts-' + $.NSUUID.UUID.UUIDString.js;
+  var rate = rateFor(speed);
+  FM.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(dir, true, $(), null);
+  try {
+    parts.forEach(function (p, k) {
+      p.voice = voice; p.wav = dir + '/' + k + '.wav'; writeText(dir + '/' + k + '.txt', p.text);
+      if (render(voice, rate, 1, dir + '/' + k + '.txt', p.wav)) p.inner = 0;   // failed: not counted
+    });
+    var q = pauseOf(parts, voice, speed);
+    return { sent: gapOf(q, 'sent'), par: gapOf(q, 'par'), cut: gapOf(q, 'cut'), measured: parts.some(function (p) { return p.inner > 0; }) };
+  } finally { rm(dir); }
+}
+function assemble(parts, wavOut, speed) {     // parts: [{wav, voice, inner, join: 'sent'|'par'|'cut'|''}]
+  var pause = {};
+  parts.forEach(function (p) { if (pause[p.voice] === undefined) pause[p.voice] = pauseOf(parts, p.voice, speed); });
   FM.createFileAtPathContentsAttributes(wavOut, $.NSData.data, $());
   var fh = $.NSFileHandle.fileHandleForWritingAtPath(wavOut), total = 0;
+  var put = function (d) { fh.writeData(d); total += Number(d.length); };   // NSData.length arrives as a string in JXA
   fh.writeData($(le(0, 44)).dataUsingEncoding($.NSISOLatin1StringEncoding));
   parts.forEach(function (p) {
-    var pcm = pcmOf(p.wav);
-    if (!pcm) die('broken part ' + p.wav);
-    fh.writeData(pcm); total += Number(pcm.length);   // NSData.length arrives as a string in JXA
-    if (p.gap) { var z = $.NSMutableData.dataWithLength(Math.round(p.gap * 48000) * 2); fh.writeData(z); total += Number(z.length); }
+    var d = pcmOf(p.wav);
+    if (!d) die('broken part ' + p.wav);
+    var n = Math.floor(Number(d.length) / 2), look = Math.min(n, SR), a, f, w, from = 0, to = n;
+    f = loud(pcm16(d, 0, look));
+    for (w = 0; w < f.length && !f[w]; w++);
+    if (w < f.length) from = Math.max(0, w * WIN - EDGE);
+    var off = n - look; f = loud(pcm16(d, off, look));
+    for (w = f.length - 1; w >= 0 && !f[w]; w--);
+    if (w >= 0) to = Math.min(n, off + (w + 1) * WIN + EDGE);
+    if (to - from > 4 * EDGE) {
+      put(faded(pcm16(d, from, EDGE), true));
+      put(d.subdataWithRange($.NSMakeRange((from + EDGE) * 2, (to - from - 2 * EDGE) * 2)));
+      put(faded(pcm16(d, to - EDGE, EDGE), false));
+    } else put(d);
+    if (p.join) put($.NSMutableData.dataWithLength(gapOf(pause[p.voice], p.join) * 2));
   });
   var h = 'RIFF' + le(36 + total, 4) + 'WAVEfmt ' + le(16, 4) + le(1, 2) + le(1, 2) + le(48000, 4) + le(96000, 4) + le(2, 2) + le(16, 2) + 'data' + le(total, 4);
   fh.seekToFileOffset(0);
@@ -1183,7 +1384,6 @@ function assemble(parts, wavOut) {     // parts: [{wav, gapAfter}]
 
 // ---------------------------------------------------------------- main
 
-var GAP_SENT = 0.45, GAP_PAR = 0.75;   // seconds; Siri's own pause after a sentence is 0.25-0.45 s
 var USAGE = 'usage: tts [-v VOICE] [-r SPEED] [-p PITCH] [-l LANG] [-f mp3|m4a|wav|aiff] [-o PATH] [-n NAME] FILE|-\n' +
   '       tts -t [-l LANG] FILE|-      text as it will be read\n' +
   '       tts -L [LANG]                voices\n' +
@@ -1244,15 +1444,10 @@ function run(argv) {
     if (!p.sentences.length) return;
     var v = pick(p.lang || first);
     if (!v) die('no voices installed');
-    var s = [], cur = '';
-    p.sentences.forEach(function (x) {
-      if (cur && cur.length + x.text.length + 1 > PART) { s.push(cur); cur = x.text; } else cur = cur ? cur + ' ' + x.text : x.text;
-    });
-    if (cur) s.push(cur);
-    s.forEach(function (x, m) { parts.push({ text: x, voice: v.id, gap: m == s.length - 1 ? GAP_PAR : GAP_SENT }); });
+    group(p.sentences, PART).forEach(function (x) { parts.push({ text: x.text, inner: x.inner, voice: v.id, join: x.join }); });
   });
   if (!parts.length) die('nothing to read');
-  parts[parts.length - 1].gap = 0;
+  parts[parts.length - 1].join = '';
 
   // output path and format
   var ffmpeg = which('ffmpeg'), fmt = a.f, dir, name = a.n;
@@ -1313,7 +1508,7 @@ function run(argv) {
     if (e) die('part «' + p.text.slice(0, 50) + '…» failed: ' + e + (exists(p.wav + '.err') ? ' (first try: ' + readText(p.wav + '.err') + ')' : ''));
   });
 
-  var wav = TMP + '/all.wav', secs = assemble(parts, wav), enc = TMP + '/out.' + fmt, r;
+  var wav = TMP + '/all.wav', secs = assemble(parts, wav, speed), enc = TMP + '/out.' + fmt, r;
   if (fmt == 'wav') r = [0, ''], enc = wav;
   else if (fmt == 'm4a') r = sh('/usr/bin/afconvert', ['-f', 'm4af', '-d', 'aac', '-b', '64000', wav, enc]);
   else if (fmt == 'aiff') r = sh('/usr/bin/afconvert', ['-f', 'AIFF', '-d', 'BEI16', wav, enc]);

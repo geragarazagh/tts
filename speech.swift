@@ -10,8 +10,15 @@ struct Part {
     let from: Int, to: Int          // UTF-16 range in the text as shown
     let lang: String
     let text: String                // after the text step
-    let paragraphEnd: Bool
+    let join: String                // what follows it: "par" (its paragraph ends), "sent" (a sentence ends) or "cut"
+                                    // (a sentence over maxPart cut at a comma); `tts` decides (joinOf)
+    var paragraphEnd: Bool { join == "par" }
 }
+
+/// The silence after a sentence, in frames at 48 kHz, for one voice at one speed: the voice's own pause between two
+/// sentences, its longest one after a paragraph, 0.6 of it after a cut, each less the two 10 ms faded edges around
+/// it. `tts` makes the numbers (gapOf, pauseOf): the same joins as the command's, which hears them inside its parts.
+struct Joins: Equatable { let sent: Int, par: Int, cut: Int, measured: Bool }
 
 /// The text step of a whole text.
 struct Plan {
@@ -38,9 +45,20 @@ enum Speed {
     static let maxPart = 400                // characters: a longer sentence is cut at a comma (about 25 s of speech)
     nonisolated static let rate = 48000     // Siri's own rate; the 22.05 kHz voices are converted to it
 
-    // Pauses: Siri's own between two sentences of one utterance, 0.29-0.35 s at 1x and 0.17-0.20 s at 2.17x
-    // (measured 2026-11-10), so about 0.32 s divided by the speed; twice that between paragraphs.
-    static let sentencePause = 0.32, paragraphPause = 0.65
+    // Pauses (2026-11-15, as the `tts` command since that day): the voice's own, measured by `tts` on the first
+    // sentences of this voice in the text spoken together (op joins); its usual ones until then. A voice given a whole
+    // text makes no longer pause at a paragraph break, and the pause belongs to voice and speed (Yelena and Aleksei
+    // ~0.37 s / speed, Simone ~0.6 s and Lesya ~0.18 s at 1.2x), so no constant fits. Before: 0.32 and 0.65 s / speed
+    // plus each sentence's own lead and tail silence, ~0.6 s at every paragraph join at 1.2x.
+    // One part of the command (its PART): as many of the voice's pauses as the command hears in one part, so the longest
+    // of them comes out as the command's (Yelena 1.2x: 0.32 s; on 600 characters 0.29 s). ~10-14 s of work for one
+    // speaker beside the two that speak; the voice's usual pauses until then.
+    static let measureChars = 1200
+    private(set) var joins: [String: Joins] = [:]   // voice id -> its joins at this speed
+    private var measured: Set<String> = [], asked: Set<String> = [], usualAsked: Set<String> = [], measureTries: [String: Int] = [:]
+    // Ended with the speech (a cancelled speech's measuring held a speaker for 10 s), its folder removed with it.
+    private var measuring: [(worker: Worker, dir: String)] = []
+    private var measureRetry = false
 
     let plan: Plan
     let voices: [String: String]            // language -> voice id
@@ -74,7 +92,8 @@ enum Speed {
 
     func isDone(_ p: Int) -> Bool { if case .done = states[p] { return true }; return false }
     func isFailed(_ p: Int) -> Bool { if case .failed = states[p] { return true }; return false }
-    var isComplete: Bool { states.indices.allSatisfy { isDone($0) || isFailed($0) } }
+    var isComplete: Bool { states.indices.allSatisfy { isDone($0) || isFailed($0) } && usedVoices.isSubset(of: measured) }
+    private var usedVoices: Set<String> { Set(parts.indices.map { voice(of: $0) }) }
     var doneCount: Int { states.indices.filter { isDone($0) || isFailed($0) }.count }
 
     /// Frames of speech of a part known so far (all of it once done).
@@ -87,9 +106,11 @@ enum Speed {
     }
 
     func gap(after p: Int) -> Int {
-        guard p < parts.count - 1 else { return 0 }
-        return Int((parts[p].paragraphEnd ? Self.paragraphPause : Self.sentencePause) / speed * Double(Self.rate))
+        guard p < parts.count - 1, let j = joins[voice(of: p)] else { return 0 }
+        switch parts[p].join { case "par": return j.par; case "cut": return j.cut; default: return j.sent }
     }
+    /// Whether the pause after a part is known (the voice's usual one comes a moment after the speech starts).
+    func gapKnown(after p: Int) -> Bool { p >= parts.count - 1 || joins[voice(of: p)] != nil }
 
     /// A part's speech plus the pause after it: exact once spoken, else estimated from the characters.
     func slot(_ p: Int) -> Int {
@@ -107,6 +128,7 @@ enum Speed {
 
     /// Where every part's speech lies in the file and the pause after it, once all are spoken (for the MP3).
     func layout() -> [(offset: Int, frames: Int, gap: Int)]? {
+        guard usedVoices.isSubset(of: measured) else { return nil }
         var out: [(Int, Int, Int)] = []
         for p in parts.indices {
             switch states[p] {
@@ -140,6 +162,7 @@ enum Speed {
 
     private func schedule() {
         guard !parts.isEmpty, !cancelled else { return }
+        askUsual()
         var running = states.filter { if case .speaking = $0 { return true }; return false }.count
         // ahead of the listener, in order, as far as `ahead` reaches; then what is behind
         var t = 0.0, order: [Int] = []
@@ -149,6 +172,12 @@ enum Speed {
             t += Double(slot(p)) / Double(Self.rate)
         }
         if ahead.isInfinite { order += Array(0..<listener) }
+        // the pauses are measured once 15 s from the listener on are spoken (2 s at most): a new start, voice or speed
+        // is not slowed by it, and the voice's usual pauses hold until then
+        var ready = 0, p = listener
+        while p < parts.count && ready < 15 * Self.rate && (isDone(p) || isFailed(p)) { ready += slot(p); p += 1 }
+        let heard = p == parts.count || ready >= 15 * Self.rate
+        if heard { measure() }
         var waiting = false
         for p in order where running < concurrency {
             guard case .none = states[p] else { continue }
@@ -156,6 +185,7 @@ enum Speed {
             start(p, on: w)
             running += 1
         }
+        if heard { measure() }
         // every worker busy with another speech (a sample, a sentence being dropped): look again shortly
         if waiting && running == 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.schedule() }
@@ -164,6 +194,67 @@ enum Speed {
         if speaking && poll == nil {
             poll = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.pollAll() } }
         } else if !speaking { poll?.invalidate(); poll = nil }
+    }
+
+    /// The voices' usual joins, at once from the quick worker: the player needs a pause after the first sentence.
+    private func askUsual() {
+        for v in usedVoices where joins[v] == nil && !usualAsked.contains(v) {
+            if let j = Engine.shared.knownJoins(voice: v, speed: speed) { joins[v] = j; measured.insert(v); continue }
+            usualAsked.insert(v)
+            Engine.shared.usualJoins(voice: v, speed: speed) { [weak self] j in
+                guard let self, !self.cancelled, self.joins[v] == nil else { return }   // the measured ones may be there first
+                self.joins[v] = j
+                self.onChange?()
+            }
+        }
+    }
+
+    /// Asks `tts` for the joins of every voice of the text not known yet, each on a free speaker.
+    private func measure() {
+        for v in usedVoices.sorted() where !measured.contains(v) && !asked.contains(v) {
+            if let j = Engine.shared.knownJoins(voice: v, speed: speed) { joins[v] = j; measured.insert(v); continue }
+            // a speaker of its own: the free ones stay for the sentences, so a new voice or speed still starts at once
+            guard let w = Engine.shared.speaker(max: concurrency + 2, fresh: true) else {
+                // every speaker busy (another speech's sample): looked at again shortly, since with every sentence
+                // spoken nothing else calls schedule() and saving would wait for this measurement for ever
+                if !measureRetry {
+                    measureRetry = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.measureRetry = false; self?.schedule() }
+                }
+                return
+            }
+            let dir = NSTemporaryDirectory() + "tts-\(UUID().uuidString)"
+            asked.insert(v)
+            measuring.append((w, dir))
+            Engine.shared.joins(on: w, voice: v, speed: speed, texts: measureTexts(v), dir: dir) { [weak self] j, last in
+                if last { try? FileManager.default.removeItem(atPath: dir) }
+                guard let self, !self.cancelled else { return }
+                if last { self.measuring.removeAll { $0.worker === w } }
+                if let j, last || self.joins[v] == nil { self.joins[v] = j }
+                if last {
+                    self.measureTries[v, default: 0] += 1
+                    // the speaker died before its answer: asked again, twice; then the usual pause, if it came, stays
+                    if j == nil && self.measureTries[v]! < 3 { self.asked.remove(v) } else { self.measured.insert(v) }
+                    if self.joins[v] == nil && self.measured.contains(v) {   // not even the usual one: 0.32 s / speed, as before
+                        let g = Int(0.32 / self.speed * Double(Self.rate)); self.joins[v] = Joins(sent: g, par: g, cut: g / 2, measured: false)
+                    }
+                }
+                self.onChange?()
+                if last { self.schedule() }
+            }
+        }
+    }
+
+    /// Paragraphs of this voice's first sentences, about measureChars in all: what `tts` speaks to hear its pauses.
+    private func measureTexts(_ v: String) -> [[String]] {
+        var out: [[String]] = [], cur: [String] = [], n = 0
+        for p in parts.indices where voice(of: p) == v {
+            cur.append(parts[p].text); n += parts[p].text.count
+            if parts[p].paragraphEnd { out.append(cur); cur = [] }
+            if n >= Self.measureChars { break }
+        }
+        if !cur.isEmpty { out.append(cur) }
+        return out
     }
 
     private func start(_ p: Int, on w: Worker) {
@@ -207,13 +298,23 @@ enum Speed {
         for (i, s) in states.enumerated() {
             if case .speaking(let r) = s { Engine.shared.abandon(r.worker); r.discard(); states[i] = .none }
         }
+        for m in measuring { Engine.shared.abandon(m.worker); try? FileManager.default.removeItem(atPath: m.dir) }
+        measuring = []
         onChange = nil; onError = nil
     }
 }
 
 /// One sentence being spoken: reads the growing CAF file, converts to 48 kHz if the voice speaks at another rate, and
-/// keeps the samples in memory until the sentence is done.
+/// keeps the samples in memory until the sentence is done. What is heard of it is its sound alone, as `tts` cuts its
+/// parts (assemble(), 2026-11-15): from 10 ms before the first 5 ms window above -50 dBFS in its first second to 10 ms
+/// after the last one in its last second, those 10 ms faded in and out, so the voice's own lead and tail silence (0-40
+/// ms) don't add to the pause after it. The start is found as the sound arrives: nothing is heard before it.
 @MainActor final class Render {
+    private static let win = 240, edge = 480                    // 5 ms windows, 10 ms edges, at 48 kHz
+    private static let quiet = Float(pow(10, -50.0 / 10)) * Float(win)   // a window's sum of squares at -50 dBFS
+    private var from: Int?                  // first sample heard, once found
+    private var to: Int?                    // after the last one heard, once the sentence is done
+    private var scanned = 0                 // windows of the first second looked at for the start
     let worker: Worker
     let path: String
     private var handle: FileHandle?
@@ -223,9 +324,44 @@ enum Speed {
     private var converter: AVAudioConverter?
     private var inFormat: AVAudioFormat?
     private var finished = false
-    var frames: Int { samples.count }
+    var frames: Int { from.map { (to ?? samples.count) - $0 } ?? 0 }
 
     init(worker: Worker, path: String) { self.worker = worker; self.path = path }
+
+    private func loud(_ at: Int) -> Bool {
+        var e: Float = 0
+        for i in at..<at + Self.win { e += samples[i] * samples[i] }
+        return e > Self.quiet
+    }
+
+    /// The start of the sound, looked for in the first second as it arrives; none there: the start of the sentence.
+    private func findStart(final: Bool) {
+        guard from == nil else { return }
+        let look = Swift.min(samples.count, Speech.rate)
+        var start: Int?
+        while (scanned + 1) * Self.win <= look {
+            if loud(scanned * Self.win) { start = Swift.max(0, scanned * Self.win - Self.edge); break }
+            scanned += 1
+        }
+        if start == nil && (final || samples.count >= Speech.rate) { start = 0 }
+        // the fade-in needs its 10 ms whole: until they have arrived the start waits (that window is looked at again),
+        // or the samples after them would stay unfaded behind a cut-off ramp
+        guard let f = start, final || samples.count >= f + Self.edge else { return }
+        from = f
+        for i in 0..<Swift.min(Self.edge, samples.count - f) { let g = Float(i) / Float(Self.edge); samples[f + i] *= g * g }
+    }
+
+    /// The end of the sound in the last second, once all of it is there; its last 10 ms faded out.
+    private func findEnd() {
+        let n = samples.count, look = Swift.min(n, Speech.rate), off = n - look
+        var w = look / Self.win - 1
+        while w >= 0 && !loud(off + w * Self.win) { w -= 1 }
+        var t = w >= 0 ? Swift.min(n, off + (w + 1) * Self.win + Self.edge) : n
+        if t - (from ?? 0) > 4 * Self.edge {
+            for i in 0..<Self.edge { let g = Float(Self.edge - 1 - i) / Float(Self.edge); samples[t - Self.edge + i] *= g * g }
+        } else { from = 0; t = n }            // under 40 ms of sound: kept whole, as in `tts`
+        to = t
+    }
 
     /// New sound since the last look; true if some arrived.
     @discardableResult func poll() -> Bool {
@@ -252,6 +388,7 @@ enum Speed {
             }
         }
         append(f, end: false)
+        findStart(final: false)
         return true
     }
 
@@ -319,15 +456,17 @@ enum Speed {
         poll()
         finished = true
         if converter != nil { append([], end: true) }
+        findStart(final: true)
+        findEnd()
     }
 
     func read(at frame: Int, count: Int, into out: UnsafeMutablePointer<Float>) -> Int {
-        let n = max(0, min(count, samples.count - frame))
-        if n > 0 { samples.withUnsafeBufferPointer { out.update(from: $0.baseAddress! + frame, count: n) } }
+        let n = max(0, min(count, frames - frame)), base = from ?? 0
+        if n > 0 { samples.withUnsafeBufferPointer { out.update(from: $0.baseAddress! + base + frame, count: n) } }
         return n
     }
 
-    var allSamples: [Float] { samples }
+    var allSamples: [Float] { from.map { Array(samples[$0..<(to ?? samples.count)]) } ?? [] }
 
     func discard() {
         try? handle?.close(); handle = nil

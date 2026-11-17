@@ -467,7 +467,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
             let l = lang ?? "en"
             for (i, s) in sentences.enumerated() {
                 guard let a = s["from"] as? Int, let b = s["to"] as? Int, let t = s["text"] as? String else { continue }
-                p.parts.append(Part(from: a, to: b, lang: l, text: t, paragraphEnd: i == sentences.count - 1))
+                p.parts.append(Part(from: a, to: b, lang: l, text: t, join: s["join"] as? String ?? (i == sentences.count - 1 ? "par" : "sent")))
                 p.chars[l, default: 0] += t.count
             }
         }, done: { [weak self] err in
@@ -619,7 +619,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
         Engine.shared.plan(sampleText, paragraph: { _, sentences in
             for (i, s) in sentences.enumerated() {
                 guard let t = s["text"] as? String else { continue }
-                p.parts.append(Part(from: 0, to: 0, lang: v.code, text: t, paragraphEnd: i == sentences.count - 1))
+                p.parts.append(Part(from: 0, to: 0, lang: v.code, text: t, join: s["join"] as? String ?? (i == sentences.count - 1 ? "par" : "sent")))
             }
         }, done: { [weak self] _ in
             guard let self, self.listening == v.id, !p.parts.isEmpty, let s = try? Speech(plan: p, voices: [v.code: v.id], speed: self.speechSpeed)

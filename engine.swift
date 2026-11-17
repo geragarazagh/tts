@@ -163,10 +163,11 @@ struct EngineError: Error, CustomStringConvertible {
 
     // MARK: speaking
 
-    /// A free speaker, started if needed; nil when `max` are busy.
-    func speaker(max: Int) -> Worker? {
+    /// A free speaker, started if needed; nil when `max` are busy. `fresh`: a new one while fewer than `max` run, so the
+    /// free ones stay for the sentences (measuring the pauses takes one for ~10 s).
+    func speaker(max: Int, fresh: Bool = false) -> Worker? {
         speakers.removeAll { $0.dead }
-        if let w = speakers.first(where: { $0.busy == 0 }) { return w }
+        if !fresh || speakers.count >= Swift.min(max, Self.limit), let w = speakers.first(where: { $0.busy == 0 }) { return w }
         guard speakers.count < Swift.min(max, Self.limit) else { return nil }
         guard let w = try? Worker() else { return nil }
         speakers.append(w)
@@ -178,6 +179,37 @@ struct EngineError: Error, CustomStringConvertible {
         w.send(["op": "render", "voice": voice, "speed": speed, "text": text, "path": path]) { o in
             done(o["error"] as? String)
             return true
+        }
+    }
+
+    /// The joins of a voice at a speed: `update` gets its usual ones at once, then (last = true) those measured on
+    /// `texts`, paragraphs of its sentences, or nil if the speaker failed. Measured on a full measureChars they are kept
+    /// for the session (the pause is the voice's, whatever the text); on less (a sample, a short text) only used.
+    private var joinsKnown: [String: Joins] = [:]
+    func knownJoins(voice: String, speed: Double) -> Joins? { joinsKnown["\(voice) \(speed)"] }
+    func joins(on w: Worker, voice: String, speed: Double, texts: [[String]], dir: String, update: @escaping (Joins?, Bool) -> Void) {
+        w.send(["op": "joins", "voice": voice, "speed": speed, "texts": texts, "dir": dir]) { [weak self] o in
+            let last = o["last"] as? Bool ?? true
+            var j: Joins?
+            if let d = o["joins"] as? [String: Any], let s = d["sent"] as? Int, let p = d["par"] as? Int, let c = d["cut"] as? Int {
+                j = Joins(sent: s, par: p, cut: c, measured: d["measured"] as? Bool ?? false)
+                if last && j!.measured && texts.joined().map(\.count).reduce(0, +) >= Speech.measureChars { self?.joinsKnown["\(voice) \(speed)"] = j }
+            }
+            update(j, last)
+            return last
+        }
+    }
+
+    /// The voice's usual joins at a speed, from the quick worker, at once (nothing spoken).
+    func usualJoins(voice: String, speed: Double, done: @escaping (Joins) -> Void) {
+        guard let w = try? controlWorker() else { return }
+        var first = true
+        w.send(["op": "joins", "voice": voice, "speed": speed, "texts": [] as [[String]]]) { o in
+            if first, let d = o["joins"] as? [String: Any], let s = d["sent"] as? Int, let p = d["par"] as? Int, let c = d["cut"] as? Int {
+                first = false
+                done(Joins(sent: s, par: p, cut: c, measured: false))
+            }
+            return o["last"] as? Bool ?? true
         }
     }
 
