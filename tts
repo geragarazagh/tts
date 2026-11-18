@@ -482,6 +482,7 @@ function mk(lang, s, kindOf) {
     return ['m', m6(s, ['', 'а', 'у', '', 'ом', 'е']), m6(s, ['ы', 'ов', 'ам', 'ы', 'ами', 'ах'])];
   }
   if (kindOf == 'fa') return ['f', m6(s, ['а', 'и', 'і', 'у', 'ою', 'і']), m6(s, ['и', '', 'ам', 'и', 'ами', 'ах'])];
+  if (kindOf == 'byte') return ['m', m6(s, ['', 'а', 'у', '', 'ом', 'і']), m6(s, ['и', '', 'ам', 'и', 'ами', 'ах'])];   // ват, герц: р. мн. = н.
   return ['m', m6(s, ['', 'а', 'у', '', 'ом', 'і']), m6(s, ['и', 'ів', 'ам', 'и', 'ами', 'ах'])];
 }
 var FIXED = function (w, g) { return [g, [w, w, w, w, w, w], [w, w, w, w, w, w]]; };
@@ -503,6 +504,11 @@ var UNITS = {
       'ТБ': tb, 'Тб': tb, 'TB': tb, 'ГГц': ghz, 'GHz': ghz, 'км': mk('ru', 'километр'), 'м': mk('ru', 'метр'), 'см': mk('ru', 'сантиметр'),
       'мм': mk('ru', 'миллиметр'), 'кг': mk('ru', 'килограмм'), 'г': mk('ru', 'грамм'), 'л': mk('ru', 'литр'), 'мл': mk('ru', 'миллилитр'),
       'ч': hour, 'мин': mk('ru', 'минут', 'fa'), 'сек': mk('ru', 'секунд', 'fa'), 'шт': pcs,
+      // 2026-11-18: «65 град. 4 мин.» (TASS on Gagarin's orbit) left «град.» as written
+      'град': deg, 'мес': ['m', ['месяц', 'месяца', 'месяцу', 'месяц', 'месяцем', 'месяце'], ['месяцы', 'месяцев', 'месяцам', 'месяцы', 'месяцами', 'месяцах']],
+      'т': mk('ru', 'тонн', 'fa'), 'га': mk('ru', 'гектар'), 'дм': mk('ru', 'дециметр'),
+      'Вт': mk('ru', 'ватт', 'byte'), 'кВт': mk('ru', 'киловатт', 'byte'), 'МВт': mk('ru', 'мегаватт', 'byte'),
+      'Гц': mk('ru', 'герц', 'byte'), 'кГц': mk('ru', 'килогерц', 'byte'), 'МГц': mk('ru', 'мегагерц', 'byte'),
       'тыс': [b[2][1], b[2][2], b[2][3]], 'млн': [b[1][1], b[1][2], b[1][3]], 'млрд': [b[0][1], b[0][2], b[0][3]]
     };
   })(),
@@ -523,11 +529,19 @@ var UNITS = {
       'ТБ': tb, 'Тб': tb, 'TB': tb, 'ГГц': ghz, 'GHz': ghz, 'км': mk('uk', 'кілометр'), 'м': mk('uk', 'метр'), 'см': mk('uk', 'сантиметр'),
       'мм': mk('uk', 'міліметр'), 'кг': mk('uk', 'кілограм'), 'г': mk('uk', 'грам'), 'л': mk('uk', 'літр'), 'мл': mk('uk', 'мілілітр'),
       'год': hour, 'хв': mk('uk', 'хвилин', 'fa'), 'сек': mk('uk', 'секунд', 'fa'), 'шт': pcs,
+      'град': deg, 'міс': ['m', ['місяць', 'місяця', 'місяцю', 'місяць', 'місяцем', 'місяці'], ['місяці', 'місяців', 'місяцям', 'місяці', 'місяцями', 'місяцях']],
+      'т': mk('uk', 'тонн', 'fa'), 'га': mk('uk', 'гектар'), 'дм': mk('uk', 'дециметр'),
+      'Вт': mk('uk', 'ват', 'byte'), 'кВт': mk('uk', 'кіловат', 'byte'), 'МВт': mk('uk', 'мегават', 'byte'),
+      'Гц': mk('uk', 'герц', 'byte'), 'кГц': mk('uk', 'кілогерц', 'byte'), 'МГц': mk('uk', 'мегагерц', 'byte'),
       'тис': [b[2][1], b[2][2], b[2][3]], 'млн': [b[1][1], b[1][2], b[1][3]], 'млрд': [b[0][1], b[0][2], b[0][3]]
     };
   })()
 };
 var MULT = { ru: caseSet('тыс млн млрд'), uk: caseSet('тис млн млрд') };
+// units that are also bits of other things (nicknames «Корней-п6т», «25:41 т если»): only «5 т» with a
+// space, no letter or digit glued after, the number not glued to letters or after a colon
+var SOFT = caseSet('т га');
+var PER = { ru: { 'ч': 'в час', 'с': 'в секунду', 'сек': 'в секунду', 'мин': 'в минуту' }, uk: { 'год': 'на годину', 'с': 'на секунду', 'сек': 'на секунду', 'хв': 'на хвилину' } };
 var CELSIUS = { ru: 'Цельсия', uk: 'за Цельсієм' };
 
 // gender of the noun after a number, guessed from its ending (matters for 1 and 2 only)
@@ -644,6 +658,38 @@ var LABEL = {
   ru: caseSet('часть глава урок серия сезон эпизод выпуск номер том страница стр пункт раздел шаг этап уровень вариант версия тур раунд день неделя класс курс модуль лекция задача задание упражнение пример рисунок таблица схема параграф статья строка'),
   uk: caseSet('частина розділ урок серія сезон епізод випуск номер том сторінка стор пункт крок етап рівень варіант версія тур раунд день тиждень клас курс модуль лекція задача завдання вправа приклад рисунок малюнок таблиця схема параграф стаття рядок')
 };
+
+// 2026-11-18. The case of a number with no preposition deciding it is the case of its noun: «равно
+// 175 километрам» was «сто семьдесят пять километрам» (TASS on Gagarin's flight), «шёл 175 километрами»
+// the same. A plural noun (or adjective) after a number not ending in one says its case by its ending:
+// -ам/-ям DAT, -ами/-ями INS, -ах/-ях PREP (also after в / на / за / у, which take ACC or PREP / INS:
+// «в 2 домах»); -ых/-их says nothing, the word after it does. After 2-4 a genitive plural (-ов, -ей;
+// uk -ів) where the nominative takes the genitive singular means the genitive: «нет 3 километров»
+// (and an animate accusative, read the same: «вижу 3 котов» -> трёх). After one, only -у/-ю is read:
+// the accusative of a feminine noun («купил 1 книгу» was «одна книгу»); a masculine dative singular
+// («равно 1 километру») has the same ending and is rarer without a preposition, so it is left wrong.
+// A capitalised word after the number is a name or a title, not its noun («1843 Страх и трепет»,
+// «статті 101 Закону»), and the second half of «25:48» is not counted. A negation right before a
+// bare number makes it genitive too: «нет 5 рублей» -> пяти. Checked on 68 312 Cyrillic lines with
+// digits from his library: the changes read, the false ones turned into these guards.
+var NOUNCASE = {
+  ru: { stop: caseSet('нам вам им ним ими ними нами вами сам сами самим самими там пополам дам продам отдам передам создам походу сразу'),
+    gen24: /^[а-яё]{2,}(ов|ев|ёв|ей)$/, neg: caseSet('нет'), neg2: caseSet('было будет стало хватает хватало хватит существует') },
+  uk: { stop: caseSet('нам вам їм ним ними нами вами сам самі самим самими там навпіл дам віддам передам'),
+    gen24: /^[а-яієїґ'’ʼ]{2,}(ів|їв|ей)$/, neg: caseSet('немає нема бракує бракувало'), neg2: caseSet('було буде стало вистачає вистачало існує') }
+};
+function nounCase(lang, w, w2, n) {
+  var R = NOUNCASE[lang], l1 = n % 10, l2 = n % 100;
+  if (!w || R.stop[w] || w.length < 4) return null;
+  if (l1 == 1 && l2 != 11) return /[ую]$/.test(w) ? ACC : null;
+  if (/(ами|ями|ьми)$/.test(w)) return INS;
+  if (/(ам|ям)$/.test(w)) return DAT;
+  if (/(ах|ях)$/.test(w)) return PREP;
+  // an adjective (-ым, -ыми, -ых) leaves it to its noun: alone, «стрим», «режим» end the same way
+  if (/(ых|их|ым|им|ыми|ими)$/.test(w)) return w2 ? nounCase(lang, w2, null, n) : null;
+  if (l1 >= 2 && l1 <= 4 && !(l2 >= 12 && l2 <= 14) && R.gen24.test(w)) return GEN;
+  return null;
+}
 
 // ---------------------------------------------------------------- the normaliser
 
@@ -943,7 +989,8 @@ function normalizeSlav(par, lang) {
     // the word after the number decides the rest
     var nw2 = nextWordAt(j2), nextTok = t[skipSp(j2)], noun = nw2 ? nw2[1] : null, nounL = noun ? noun.toLowerCase() : null;
     var unit = preUnit, unitAt = -1, unitEnd = j2;
-    if (!unit && nextTok && U[nextTok] && !(nextTok == 'г' && n >= 1000 && n <= 2100) && !(nextTok == 'м' && /^\p{L}/u.test(t[skipSp(j2) + 1] || ''))) {
+    var soft = SOFT[nextTok] && !(isSp(j2) && !/^[\p{L}\d]/u.test(t[j2 + 2] || '') && !isWord(start - 1) && t[start - 1] != ':');
+    if (!unit && nextTok && U[nextTok] && !soft && !(nextTok == 'г' && n >= 1000 && n <= 2100) && !(nextTok == 'м' && /^\p{L}/u.test(t[skipSp(j2) + 1] || ''))) {
       // a unit after the number: 512 ГБ, 75 %, 20 $
       if (nextTok != '°' || true) { unit = U[nextTok]; unitAt = skipSp(j2); unitEnd = unitAt + 1; }
     }
@@ -981,6 +1028,15 @@ function normalizeSlav(par, lang) {
 
     // plain or decimal number, maybe with a unit
     var c1 = c0, gnd;
+    if (!unit && noun && noun == nounL && !PREPS[lang][nounL] && !forceGen && (pcRaw == null || pcRaw == ACC) && t[start - 1] != ':') {
+      var nw3 = nextWordAt(nw2[0] + 1), nc = nounCase(lang, nounL, nw3 ? nw3[1].toLowerCase() : null, range ? range[1] : n);
+      if (pcRaw == ACC ? nc == PREP || nc == INS : nc != null) c1 = nc;
+    }
+    if (pcRaw == null && !forceGen && c1 == NOM) {     // нет 5 рублей, не было 5 книг
+      var pw1 = isSp(start - 1) && isWord(start - 2) ? t[start - 2].toLowerCase() : null, pw2 = null;
+      if (pw1) pw2 = isSp(start - 3) && isWord(start - 4) ? t[start - 4].toLowerCase() : null;
+      if (NOUNCASE[lang].neg[pw1] || (pw2 == 'не' && NOUNCASE[lang].neg2[pw1])) c1 = GEN;
+    }
     if (unit) gnd = unit[0];
     else if (noun && !PREPS[lang][nounL]) gnd = guessGender(lang, noun, n, c1);
     else {     // no noun after: one before agrees, when the number is not governed by a preposition
@@ -1017,6 +1073,12 @@ function normalizeSlav(par, lang) {
       }
       if (celsius) uw += ' ' + CELSIUS[lang];
       var endAt = unitAt >= 0 ? unitEnd : j2;
+      // per hour, per second: 28 км/ч, 8 м/с (2026-11-18: was «километров/ч»)
+      var per = unitAt >= 0 && t[endAt] == '/' && PER[lang][t[endAt + 1]];
+      if (per) { uw += ' ' + per; endAt += 2; if (t[endAt] == '²') { uw += lang == 'ru' ? ' в квадрате' : ' в квадраті'; endAt++; } }
+      // watt-hours: 76 Вт·ч -> ватт-часов
+      var hu = unitAt >= 0 && t[endAt] == '·' && t[endAt + 1] == (lang == 'ru' ? 'ч' : 'год') && U[t[endAt + 1]];
+      if (hu) { uw += '-' + (frac !== null ? hu[1][GEN] : agree(lang, n, c1, hu[1], hu[2])); endAt += 2; }
       var dt = unitAt >= 0 && /^\p{L}/u.test(t[unitAt]) ? eatDot(endAt) : [endAt, ''];
       emit(words + ' ' + uw + dt[1]); i = dt[0]; continue;
     }
@@ -1094,6 +1156,11 @@ function paragraphs(text) {
   if (cur) out.push(cur);
   return out;
 }
+var UNIT_DOT = (function () {
+  var o = { 'г': 1, 'гг': 1, 'р': 1, 'рр': 1 };
+  ['ru', 'uk'].forEach(function (l) { for (var k in UNITS[l]) if (/^[Ѐ-ӿ]+$/.test(k)) o[k] = 1; });
+  return o;
+})();
 // Sentences of a paragraph as [from, to) in it; one longer than `max` is cut at , ; — then at a space.
 function sentences(par, max) {
   var s = par.text, re = /([.!?…]["»”)]*)\s+(?=["«„(\p{Lu}\d—–-])/gu, out = [], from = 0, m;
@@ -1109,7 +1176,12 @@ function sentences(par, max) {
     }
     if (b > a) out.push([a, b]);
   };
-  while ((m = re.exec(s))) { push(from, m.index + m[1].length); from = m.index + m[0].length; }
+  while ((m = re.exec(s))) {
+    // no end after a unit's dot with a number next: «65 град. 4 мин.», «3 ч. 20 мин.», «1961 г. 12 апреля»
+    var ab = m[1] == '.' && /^\d/.test(s.slice(m.index + m[0].length)) && /\d\s?([Ѐ-ӿ]+)$/.exec(s.slice(Math.max(0, m.index - 12), m.index));
+    if (ab && UNIT_DOT[ab[1]]) continue;
+    push(from, m.index + m[1].length); from = m.index + m[0].length;
+  }
   push(from, s.length);
   return out;
 }
