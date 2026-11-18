@@ -596,6 +596,49 @@ var PREPS = {};
 // words before the number that leave it free to agree with a noun before: «чисток было около 40»
 var APPROX = { ru: caseSet('около больше меньше более менее свыше порядка'), uk: caseSet('близько понад більше менше') };
 var PARTITIVE = { ru: caseSet('из'), uk: caseSet('з із зі') };
+// 2026-11-18. With the counted noun before, the number keeps the case of its own place in the clause,
+// as if the noun stood after it: «книг я прочитал одну», «гривень витратив одну» (object, accusative),
+// but «книг осталась одна», «чисток было 42» (subject). The number is the subject only when the verb
+// agrees with it; a verb that can't agree with «одна» (masculine or plural past, first or second person,
+// an infinitive) or a transitive feminine past makes it the object. Only a feminine one changes
+// (одна -> одну, двадцать одна -> двадцать одну): masculine and neuter inanimate and feminine 2-4 read
+// the same in both cases, and animate nouns are not told apart. The verb is known by its ending, the
+// one nearest the number deciding; a word right after a preposition is the preposition's (за неделю,
+// у меня), not the verb. Agreeing forms (reflexive, neuter past, быть, intransitive feminine past) stop
+// the search, so an object form further back can't override them.
+var ROLE = {
+  ru: {
+    subj: /(ся|сь|ло)$/,
+    stay: caseSet('быть был была были есть будет будут стал стала пришла ушла вышла прошла шла пропала упала лежала стояла висела ' +
+      'сидела жила умерла выросла исчезла погибла сгорела прибыла'),
+    obj: /^.{1,}(ал|ял|ил|ыл|ел|ёл|ул|ала|яла|ила|ыла|ела|ула|ёла|али|яли|или|ыли|ели|ули|ёли|аю|яю|ею|ешь|ёшь|ишь|ете|ёте|ите|аем|яем|еем|.{2}ать|.{2}ять|.{2}ить|.{2}еть|.{2}уть|.{2}ыть)$/,
+    objWord: caseSet('пью ем ел съел нашёл нашла нашли трачу плачу беру куплю вижу пишу ношу дам дал взял хочу могу везу несу пить дать брать'),
+    notObj: caseSet('стол пол угол футбол сериал канал зал вокзал журнал материал капитал финал сигнал персонал потенциал идеал ' +
+      'генерал отдел раздел предел пробел стул начала дела тела правила сила могила печать кровать тетрадь благодать ' +
+      'знать мать рать путь суть ртуть сеть треть')
+  },
+  uk: {
+    subj: /(ся|сь|ло)$/,
+    stay: caseSet('бути був була були є буде будуть стала прийшла пішла вийшла пройшла йшла пропала впала лежала стояла висіла ' +
+      'сиділа жила померла виросла зникла загинула згоріла прибула'),
+    obj: /^.{1,}(ав|яв|ив|ов|ув|їв|ала|яла|ила|іла|їла|ула|ли|ую|юю|аю|яю|єш|иш|еш|ємо|имо|емо|їмо|єте|ите|ете|їте|.ти)$/,
+    objWord: caseSet("п'ю п’ю їм беру плачу куплю трачу дам візьму хочу можу везу несу"),
+    notObj: caseSet('вплив злив мотив актив позитив негатив колектив обєктив рукав держав прав вистав застав сила могила тіла ' +
+      'діла правила діти хати палати зарплати роботи')
+  }
+};
+// the case of a free number after its counted noun: ACC when a verb between them makes it an object,
+// else NOM; words: [word, right after a preposition], nearest the number first
+function roleCase(lang, words) {
+  var R = ROLE[lang];
+  for (var q = 0; q < words.length; q++) {
+    var w = words[q][0];
+    if (words[q][1] || PREPS[lang][w]) continue;
+    if (R.subj.test(w) || R.stay[w]) return NOM;
+    if (R.objWord[w] || (w.length >= 3 && R.obj.test(w) && !R.notObj[w])) return ACC;
+  }
+  return NOM;
+}
 // a noun right before the number that names it rather than counts it: «Разбор сделок, часть 2»
 var LABEL = {
   ru: caseSet('часть глава урок серия сезон эпизод выпуск номер том страница стр пункт раздел шаг этап уровень вариант версия тур раунд день неделя класс курс модуль лекция задача задание упражнение пример рисунок таблица схема параграф статья строка'),
@@ -694,14 +737,16 @@ function normalizeSlav(par, lang) {
   // the gender of a listed genitive plural noun up to five words before the number k in its clause
   // («чисток было 42», «из 5 книг мне понравились 2»); null when there is none or it belongs to
   // something else: a preposition before it («из-за ошибок пропало 2»; partitive из / з allowed), or
-  // another number counting it («5 книг стоили 21»)
+  // another number counting it («5 книг стоили 21»). Returns [gender, the case the number's place
+  // in the clause gives it (roleCase)]
   var countedBack = function (k) {
-    var C = COUNTED[lang];
+    var C = COUNTED[lang], between = [];
     for (var m = 0, j = k - 1; j >= 0 && m < 5; j--) {
       if (isNum(j) || /^[.!?…:;,()\[\]]$/.test(t[j])) return null;
       if (!isWord(j)) continue;
       var w = t[j].toLowerCase(), g = C[0][w] || (C[1].test(w) ? 'f' : null);
-      if (!g) { m++; continue; }
+      if (!g) { var pw = prevWord(j); between.push([w, !!(pw && PREPS[lang][pw])]); m++; continue; }
+      g = [g, roleCase(lang, between)];
       var p = j - 1;
       while (p >= 0 && isSp(p)) p--;
       if (isNum(p)) { p--; while (p >= 0 && isSp(p)) p--; return isWord(p) && PARTITIVE[lang][t[p].toLowerCase()] ? g : null; }
@@ -945,7 +990,9 @@ function normalizeSlav(par, lang) {
       var marker = (t[j2] == ')' || (t[j2] == ',' && /^\p{Lu}/u.test(t[skipSp(j2 + 1)] || ''))) &&
         !/\(/.test(t.slice(0, start).join('').split(/[.!?…]/).pop());
       var free = (pcRaw == null || forceGen || APPROX[lang][pw0]) && !LABEL[lang][pw0] && !marker;
-      gnd = (free && countedBack(start)) || 'm';
+      var cb = free && countedBack(start);
+      gnd = cb ? cb[0] : 'm';
+      if (cb && pcRaw == null && !forceGen) c1 = cb[1];     // «гривень витратив 1» -> одну
     }
     if (frac !== null) {
       words = decimal(lang, n, frac, c1);
