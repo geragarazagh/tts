@@ -107,7 +107,7 @@ Either way, Siri voices stay in macOS; System Settings removes them.
 
 ### Details
 
-- Version: 0.6.
+- Version: 0.7.
 - Bundle ID: `com.geragaraza.tts`.
 - Download: `TTS.dmg`, 1.8 MB.
 - Requires: Apple silicon, macOS 13 or later.
