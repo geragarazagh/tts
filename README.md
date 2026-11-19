@@ -2,9 +2,7 @@
 
 # TTS (Text to Speech) for Mac
 
-Free, open source text to speech app for macOS. A text pasted into the window or a file dropped on it is read aloud with the voices of macOS, Siri’s included, and the speech can be saved as an MP3.
-
-Apple silicon, macOS 13 or later. Signed with a Developer ID and notarized by Apple.
+TTS (Text to Speech) is a free, open source text to speech app for macOS. It reads aloud a text pasted into its window or a file dropped on it, with the voices of macOS, Siri’s included, and saves the speech as MP3.
 
 ![TTS in use: page 2 of Lincoln's Gettysburg Address in his own hand (the Bliss copy) in Preview, and TTS reading the speech with Siri's Voice 1, the sentence “The world will little note, nor long remember what we say here” highlighted, dark appearance](docs/scene.webp)
 
@@ -20,30 +18,30 @@ brew install geragarazagh/tap/tts
 
 ## Use
 
-A text is pasted or dropped as a file: plain text, Markdown, RTF, Word, OpenDocument, HTML, PDF. Markdown loses its syntax, the words stay.
+The window takes a pasted text or a dropped file: plain text, Markdown, RTF, Word, OpenDocument, HTML or PDF. Markdown is read without its markup.
 
-The voice button at the top opens the voices of the language the text is in, named as System Settings names them: Siri’s “Voice 1”, “Voice 2” and so on where Siri speaks the language, otherwise the best voice macOS has (Ukrainian: Lesya). A click on a name chooses the voice; the waveform button next to it plays a short sample, spoken on the spot by that voice at the chosen speed, and a second press stops it. During reading a new voice goes on from the start of the same sentence.
+The voice button at the top opens the voices of the language the text is in, named as System Settings names them: Siri’s “Voice 1”, “Voice 2” and so on where Siri speaks the language, otherwise the best voice macOS has (Ukrainian: Lesya). A click on a name chooses the voice; the waveform button next to it plays a short sample, spoken on the spot by that voice at the chosen speed, and a second press stops it. A voice chosen during reading takes over from the start of the current sentence.
 
-Siri’s voices are a free download in System Settings. When the language has Siri voices but none is downloaded, the list starts with Download Siri Voices…, which opens the right page of System Settings and names the steps left there; coming back to the app, the list shows the new voice.
+Siri’s voices are a free download in System Settings. When the language has Siri voices but none is downloaded, the list starts with Download Siri Voices…, which opens the right page of System Settings and names the steps left there; back in the app, the list shows the new voice.
 
-Speed goes from 0.6× to 3.5×, 1.0× being the normal rate of the Mac. The voice itself speaks faster or slower, the sound is never stretched: a new speed is heard at once, from the start of the sentence being read. Save MP3 writes the whole text in the chosen voice and speed, with the same pauses.
+Speed goes from 0.6× to 3.5×, 1.0× being the normal rate of the Mac. The voice itself speaks faster or slower, so the sound is not stretched, and a new speed is heard at once, from the start of the sentence being read. Save MP3 writes the whole text in the chosen voice and speed, with the same pauses.
 
 The sentence being read is highlighted, and the text scrolls to keep it in view. Command-Plus and Command-Minus change the text size.
 
-Space plays and pauses, the Left and Right arrows jump 15 seconds, when the cursor is not in the text. A click outside the text or Esc takes the cursor out.
+When the cursor is not in the text, Space plays and pauses and the Left and Right arrows jump 15 seconds. A click outside the text or Esc takes the cursor out of it.
 
 ## For advanced users and language models
 
-TTS speaks with Apple’s own voices. Speech starts in about half a second and is made on the Mac itself, so the app works without internet and sends nothing anywhere. Checked while Siri spoke a long text: Apple’s speech processes opened no network connection. The only network use of the app is its daily check for updates.
+TTS speaks with the voices built into macOS. Speech is made on the Mac and starts about half a second after Play, so the app works without internet and sends no text anywhere: while Siri spoke a long text, Apple’s speech processes opened no network connection. The app itself goes online only for its daily update check.
 
 ### How it works
 
 - Voices: macOS lists Siri’s voices only to programs Apple signed. The app has `osascript`, a part of every Mac, run its script `tts` (JavaScript for Automation), which speaks with AVSpeechSynthesizer and so gets every voice the Mac has. Siri’s voices checked this way on macOS 27; the app itself on 13, 14 and 26 with the voices those Macs had. Apple does not document this way; if an update closes it, the app speaks with the other voices of macOS.
-- Text step for Russian and Ukrainian: numbers become words in the case and gender the sentence needs (preposition before, noun after or before: с 18 ГБ, до 12:00, з 08:00, книг у меня 21), with dates, times, years, Roman centuries, decimals, fractions, ranges, currencies, percent, degrees and units; abbreviations are expanded, “ИИ” in its case too. Markdown marks, emoji and links (read as their site) go. A Russian test text with 35 numbers was read right in full, a Ukrainian one with 16 too; without this step Siri read 31 of the 35.
+- Text step for Russian and Ukrainian: numbers are written out as words in the case and gender the sentence needs. The case comes from a preposition before the number (с 18 ГБ, до 12:00, з 08:00); with none, from the ending of the noun after it (равно 175 километрам, купил 21 книгу) or, when the counted noun comes first, from the verb (книг у меня 21, минут ждал 1). Dates, times, years, Roman centuries, decimals, fractions, ranges, currencies and percent are read the same way. Units after a number are read as words, abbreviated ones included (км, ГБ, град., Вт·ч, км/ч, м/с), and so are abbreviations, “ИИ” in its case too. Markdown marks, emoji and links (read as their site) are dropped. A Russian test text with 35 numbers was read right in full, a Ukrainian one with 16 too; without this step Siri read 31 of the 35.
 - Each paragraph gets its language. Russian, Ukrainian, Bulgarian and Kazakh by their letters and common words; a Cyrillic line with nothing to tell them apart (a heading, a title, a name) takes the language of the text around it, and a text of such lines alone takes the first of these languages in the Mac’s list of languages. A Russian paragraph with English words stays in one voice. Other languages by Apple’s language recognizer; a line in Latin letters whose language the recognizer is unsure of (names, models, numbers) is read in English. For a language without a chosen voice the best voice of the same kind is taken, and of several Siri voices the one with the lowest number.
 - Sentences are spoken one by one by two helper processes (all performance cores when saving), each into a file that grows while the voice speaks, so a sentence plays while it is still being made and the highlight is exact. The pauses between sentences are those the voice makes inside a longer text: one more helper process speaks the voice’s first sentences of the text, about 1,200 characters, in one go, and the silences between them give the pause after a sentence (their median), after a paragraph (their 95th percentile) and after a sentence cut at a comma (0.6 of the median). Until that measurement is done, about 15 seconds after Play, the pauses are 0.37 s after a sentence and 0.48 s after a paragraph at 1×, divided by the speed. Each sentence is trimmed to its sound with 10 ms fades, so its own leading and trailing silence does not lengthen the pause. The command line tool joins its parts by the same rule.
 - Voice samples are spoken on the Mac when the button is pressed: the app carries no recordings of Apple’s voices. In Russian the voices read Woland from Bulgakov’s “The Master and Margarita”, in Ukrainian the start of Kotliarevsky’s “Eneida”, in English Shakespeare’s seven ages of man; in other languages the start of the text.
-- While listening, the sound lives as 16-bit samples in a temporary file that has no name on disk (deleted the moment it is opened), so nothing is left behind.
+- While listening, the sound is held as 16-bit samples in a temporary file that has no name on disk (deleted the moment it is opened), so nothing is left behind.
 - MP3: LAME 4.0 (LGPL), mono, 48 kHz, VBR quality 2, about 48 MB an hour, with the LAME tag so players show the exact length; its comment says the speech is synthetic.
 - The script is also a command line tool (a text file to MP3, M4A, WAV or AIFF, voice, speed, `-t` prints the text as it will be read, `-L` lists the voices); its help:
 
@@ -115,7 +113,7 @@ Either way, Siri voices stay in macOS; System Settings removes them.
 - Requires: Apple silicon, macOS 13 or later.
 - Permissions: none. Network: to check for updates.
 - Signed with a Developer ID and notarized by Apple.
-- Code: Swift with AppKit, about 2,700 lines, the script `tts` in JavaScript for Automation, about 1,500 lines, LAME, and Sparkle for updates.
+- Code: Swift with AppKit, about 2,700 lines, the script `tts` in JavaScript for Automation, about 1,600 lines, LAME, and Sparkle for updates.
 - License: MIT.
 
 ### Build
