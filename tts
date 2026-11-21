@@ -411,7 +411,8 @@ var PREP_CASE = {
 };
 function prepCase(lang, w, rest) {
   if (!w) return null;
-  if (lang == 'ru' && (w == 'с' || w == 'со')) return /(^|\s)(до|по)\s/.test(rest) ? GEN : INS;
+  // «с 1 га» is a yield («с одного гектара»), not company: an area unit after с takes the genitive (2026-11-21)
+  if (lang == 'ru' && (w == 'с' || w == 'со')) return /(^|\s)(до|по)\s/.test(rest) || /^\s*[\d\s.,–-]*(га|м²|км²|сот(ки|ок|ка|ку)?)(?![а-яё])/.test(rest) ? GEN : INS;
   if (lang == 'ru' && w == 'по') return 'po';
   var t = PREP_CASE[lang];
   for (var i = 0; i < t.length; i++) if (t[i][1][w]) return t[i][0];
@@ -674,13 +675,19 @@ var LABEL = {
 // digits from his library: the changes read, the false ones turned into these guards.
 var NOUNCASE = {
   ru: { stop: caseSet('нам вам им ним ими ними нами вами сам сами самим самими там пополам дам продам отдам передам создам походу сразу'),
-    gen24: /^[а-яё]{2,}(ов|ев|ёв|ей)$/, neg: caseSet('нет'), neg2: caseSet('было будет стало хватает хватало хватит существует') },
+    gen24: /^[а-яё]{2,}(ов|ев|ёв|ей)$/, neg: caseSet('нет'),
+    dat1: /^(равн[оаыя]?$|равен|равня|соответству|подобн|эквивалентн|радова|рад[аы]?$|помога|помоч|помог|служи|служа|принадлеж|завидова|сочувству|подража|способству|препятству|угрожа|меша)/, neg2: caseSet('было будет стало хватает хватало хватит существует') },
   uk: { stop: caseSet('нам вам їм ним ними нами вами сам самі самим самими там навпіл дам віддам передам'),
-    gen24: /^[а-яієїґ'’ʼ]{2,}(ів|їв|ей)$/, neg: caseSet('немає нема бракує бракувало'), neg2: caseSet('було буде стало вистачає вистачало існує') }
+    gen24: /^[а-яієїґ'’ʼ]{2,}(ів|їв|ей)$/, neg: caseSet('немає нема бракує бракувало'),
+    dat1: /^(дорівню|рівн[аеоі]?$|відповіда|подібн|еквівалентн|раді|рад[аі]?$|допомага|допомог|служи|служа|належ|заздри|співчува|сприя|заважа|загрожу)/, neg2: caseSet('було буде стало вистачає вистачало існує') }
 };
-function nounCase(lang, w, w2, n) {
+function nounCase(lang, w, w2, n, before) {
   var R = NOUNCASE[lang], l1 = n % 10, l2 = n % 100;
-  if (!w || R.stop[w] || w.length < 4) return null;
+  if (!w || R.stop[w]) return null;
+  // after a word that takes only the dative (no direct object), -у/-ю after one is a masculine dative:
+  // «равно 1 километру», «радоваться 1 дню» (2026-11-21; before, every -у/-ю was a feminine accusative)
+  if (l1 == 1 && l2 != 11 && before && R.dat1.test(before) && /[ую]$/.test(w)) return DAT;
+  if (w.length < 4) return null;
   if (l1 == 1 && l2 != 11) return /[ую]$/.test(w) ? ACC : null;
   if (/(ами|ями|ьми)$/.test(w)) return INS;
   if (/(ам|ям)$/.test(w)) return DAT;
@@ -1029,7 +1036,7 @@ function normalizeSlav(par, lang) {
     // plain or decimal number, maybe with a unit
     var c1 = c0, gnd;
     if (!unit && noun && noun == nounL && !PREPS[lang][nounL] && !forceGen && (pcRaw == null || pcRaw == ACC) && t[start - 1] != ':') {
-      var nw3 = nextWordAt(nw2[0] + 1), nc = nounCase(lang, nounL, nw3 ? nw3[1].toLowerCase() : null, range ? range[1] : n);
+      var nw3 = nextWordAt(nw2[0] + 1), nc = nounCase(lang, nounL, nw3 ? nw3[1].toLowerCase() : null, range ? range[1] : n, isSp(start - 1) && isWord(start - 2) ? t[start - 2].toLowerCase() : null);
       if (pcRaw == ACC ? nc == PREP || nc == INS : nc != null) c1 = nc;
     }
     if (pcRaw == null && !forceGen && c1 == NOM) {     // нет 5 рублей, не было 5 книг
