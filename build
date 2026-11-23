@@ -1,9 +1,15 @@
 #!/bin/zsh
-# Builds TTS.app in this folder. Needs the Xcode Command Line Tools; the icon also needs full Xcode (actool).
+# Builds TTS.app in this folder. Works with Xcode Command Line Tools alone for ad-hoc local builds;
+# full Xcode in /Applications is used for Icon Composer / Assets.car (required for Developer ID signed releases).
 set -e
 cd "${0:A:h}"
 # It changes per release, not per build.
 version=0.7 min=13.0 id=com.geragaraza.tts app=TTS.app
+xc=${XCODE_CONTENTS:-/Applications/Xcode.app/Contents}
+has_xcode=0; [ -d "$xc/Developer" ] && [ -x "$xc/Applications/Icon Composer.app/Contents/Executables/ictool" ] && has_xcode=1
+if [ -n "${SIGN_ID:-}" ] && [ "$SIGN_ID" != - ] && [ $has_xcode -eq 0 ]; then
+  echo "Developer ID builds require full Xcode at $xc (for Assets.car)"; exit 1
+fi
 tmp=$(mktemp -d); trap 'rm -rf $tmp' EXIT
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
@@ -36,11 +42,13 @@ swiftc -O -target arm64-apple-macos$min -module-name TTS -parse-as-library \
 
 # Icon, as STT: icon.swift draws the picture, Icon Composer's format, actool compiles it (see STT's build for why
 # glass, shadow and translucency are off and why the light picture is the entry without an appearance).
-xc=/Applications/Xcode.app/Contents
+# On Macs with Command Line Tools only (no Xcode.app), pack AppIcon.icns from icon.swift via sips + iconutil.
 swiftc -O -o $tmp/icon icon.swift
 mkdir -p $tmp/AppIcon.icon/Assets docs
-$tmp/icon $tmp/AppIcon.icon/Assets docs/wave.svg
-cat > $tmp/AppIcon.icon/icon.json <<'JSON'
+$tmp/icon $tmp/AppIcon.icon/Assets $tmp/wave.svg
+if [ $has_xcode -eq 1 ]; then
+  cp $tmp/wave.svg docs/wave.svg
+  cat > $tmp/AppIcon.icon/icon.json <<'JSON'
 {
   "fill" : "system-light",
   "fill-specializations" : [ { "appearance" : "dark", "value" : "system-dark" } ],
@@ -50,16 +58,26 @@ cat > $tmp/AppIcon.icon/icon.json <<'JSON'
   "supported-platforms" : { "squares" : [ "macOS" ] }
 }
 JSON
-DEVELOPER_DIR=$xc/Developer xcrun actool $tmp/AppIcon.icon --compile "$PWD/$app/Contents/Resources" --platform macosx \
-  --minimum-deployment-target $min --app-icon AppIcon --output-partial-info-plist $tmp/icon.plist --target-device mac >/dev/null
-for r in Default Dark; do
-  "$xc/Applications/Icon Composer.app/Contents/Executables/ictool" $tmp/AppIcon.icon --export-image --output-file $tmp/$r.png \
-    --platform macOS --rendition $r --width 206 --height 206 --scale 1 >/dev/null
-  sips -p 256 256 $tmp/$r.png --out docs/icon${${r:#Default}:+-dark}.png >/dev/null
-done
+  DEVELOPER_DIR=$xc/Developer xcrun actool $tmp/AppIcon.icon --compile "$PWD/$app/Contents/Resources" --platform macosx \
+    --minimum-deployment-target $min --app-icon AppIcon --output-partial-info-plist $tmp/icon.plist --target-device mac >/dev/null
+  for r in Default Dark; do
+    "$xc/Applications/Icon Composer.app/Contents/Executables/ictool" $tmp/AppIcon.icon --export-image --output-file $tmp/$r.png \
+      --platform macOS --rendition $r --width 206 --height 206 --scale 1 >/dev/null
+    sips -p 256 256 $tmp/$r.png --out docs/icon${${r:#Default}:+-dark}.png >/dev/null
+  done
+else
+  echo "Note: Xcode not found at $xc; using iconutil fallback for AppIcon.icns."
+  mkdir -p $tmp/AppIcon.iconset
+  for sz in 16 32 128 256 512; do
+    sips -z $sz $sz $tmp/AppIcon.icon/Assets/light.png --out $tmp/AppIcon.iconset/icon_${sz}x${sz}.png >/dev/null
+    sips -z $((sz*2)) $((sz*2)) $tmp/AppIcon.icon/Assets/light.png --out $tmp/AppIcon.iconset/icon_${sz}x${sz}@2x.png >/dev/null
+  done
+  iconutil -c icns $tmp/AppIcon.iconset -o "$app/Contents/Resources/AppIcon.icns"
+fi
 cp LICENSE THIRD-PARTY-LICENSES.md "$app/Contents/Resources/" 2>/dev/null || true
 # The voices' engine: the `tts` script, the same file as the author's command line tool (engine.swift says why).
 cp tts "$app/Contents/Resources/tts"
+[ -f skills/tts/SKILL.md ] && cp skills/tts/SKILL.md "$app/Contents/Resources/SKILL.md"
 
 # Text files of every kind open in TTS from Finder's Open With and by dropping on the Dock icon. Alternate: never the
 # default app for a type someone else owns.

@@ -7,6 +7,21 @@ import UniformTypeIdentifiers
 @main
 @MainActor final class App: NSObject, NSApplicationDelegate {
     static func main() {
+        let args = CommandLine.arguments
+        if let first = args.dropFirst().first {
+            let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+            let res = Bundle.main.resourceURL?.appendingPathComponent("tts").path ?? "/Applications/TTS.app/Contents/Resources/tts"
+            let usage = """
+            TTS \(v) — offline text-to-speech for Mac.
+            Command line tool: \(res) --help
+            Usage: tts [-v VOICE] [-r SPEED] [-l LANG] [-f FORMAT] [-o PATH] FILE|-
+                   tts -L [LANG]    list voices
+                   tts -t FILE|-    preview normalised text
+            """
+            if first == "--version" || first == "-V" { print("TTS \(v)"); exit(0) }
+            if first == "--help" || first == "-h" { print(usage); exit(0) }
+            if first.hasPrefix("--") { FileHandle.standardError.write(Data((usage + "\n").utf8)); exit(1) }
+        }
         registerAppDefaults()
         let app = NSApplication.shared
         let d = App()
