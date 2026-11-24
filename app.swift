@@ -9,8 +9,12 @@ import UniformTypeIdentifiers
     static func main() {
         let args = CommandLine.arguments
         if let first = args.dropFirst().first {
-            let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
-            let res = Bundle.main.resourceURL?.appendingPathComponent("tts").path ?? "/Applications/TTS.app/Contents/Resources/tts"
+            // executableURL, not argv[0] or Bundle.main: run through a symlink (a Homebrew or ~/.local/bin link to this
+            // binary) Bundle.main is not the app, and the version read 0 (measured 2026-11-24, as the other apps on 11-23).
+            let real = (Bundle.main.executableURL ?? URL(fileURLWithPath: args[0])).resolvingSymlinksInPath()
+            let bundle = Bundle(url: real.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) ?? .main
+            let v = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+            let res = bundle.resourceURL?.appendingPathComponent("tts").path ?? "/Applications/TTS.app/Contents/Resources/tts"
             let usage = """
             TTS \(v) — offline text-to-speech for Mac.
             Command line tool: \(res) --help
