@@ -44,13 +44,25 @@ final class TextView: NSTextView {
         }
     }
 
-    // Pasted Markdown loses its syntax at once.
+    // Pasted Markdown loses its syntax at once. Any other text goes in as a plain string, typed in one go, not by
+    // AppKit's paste: that paste turns the bidi embedding and override characters of a plain string (U+202A-U+202E) into
+    // nested writing-direction attributes, and on macOS 26 and 27 a run nested deep after a shallower one makes
+    // CoreFoundation's bidi pass trap («Size of noLongerSeeControlChars has exceeded allowed control character limit»),
+    // TextKit 1 and 2 alike, TextEdit too; the many attribute runs also cost minutes of layout on macOS 26 (a 445 000
+    // character paste held the main thread 470 s). Stress matrix 2026-11-27 (two crashes); Copia and Merum met the same
+    // trap and paste the same way. Every character stays as pasted, the controls included.
     override func paste(_ s: Any?) {
-        if let t = NSPasteboard.general.string(forType: .string), TextImport.looksLikeMarkdown(t) {
-            insertText(TextImport.tidy(TextImport.markdown(t)), replacementRange: selectedRange())
-        } else {
-            pasteAsPlainText(s)
+        guard let t = NSPasteboard.general.string(forType: .string) else { pasteAsPlainText(s); return }
+        insertText(TextImport.looksLikeMarkdown(t) ? TextImport.tidy(TextImport.markdown(t)) : t, replacementRange: selectedRange())
+    }
+
+    // The same for text dropped or brought by a service: AppKit reads every pasteboard into the text here.
+    override func readSelection(from pb: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        guard [.string, .rtf, .rtfd, .html].contains(type), let t = pb.string(forType: .string) else {
+            return super.readSelection(from: pb, type: type)
         }
+        insertText(t, replacementRange: rangeForUserTextChange)
+        return true
     }
 
     override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation {
@@ -342,7 +354,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
 
     /// The language whose voices the list shows: the text's main one; with no text, the app's, else the Mac's first.
     private var listLanguage: String {
-        if let m = plan?.main, !text.isEmpty { return m }
+        if let m = plan?.main, hasText { return m }
         let has = { (c: String) in Engine.shared.voices.contains { $0.code == c } }
         if has(appLanguage) { return appLanguage }
         for l in Locale.preferredLanguages {
@@ -459,7 +471,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
 
     private func makePlan() {
         let content = textView.string
-        guard !text.isEmpty else { plan = nil; refreshVoiceTitle(); return }
+        guard hasText else { plan = nil; refreshVoiceTitle(); return }
         if plan?.text == content || planning { return }
         planning = true
         var p = Plan(text: content)
@@ -524,7 +536,14 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
         return true
     }
 
-    private var text: String { textView.string.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// Whether there is anything to read: looks only as far as the first letter, so it costs nothing however long the
+    /// text. Before, the whole text was copied and trimmed for it, and asked on every keystroke (refreshControls, menu
+    /// validation) a pasted text of a few hundred thousand characters held the main thread up to 22 s a keystroke
+    /// (stress matrix 2026-11-27).
+    private var hasText: Bool {
+        guard let s = textView.textStorage?.mutableString else { return false }
+        return s.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted).location != NSNotFound
+    }
 
     // MARK: playing
 
@@ -533,7 +552,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
         if let s = player.speech, s.plan.text == textView.string, s.voices == voiceMap, s.speed == speechSpeed {
             player.toggle(); return
         }
-        guard !text.isEmpty else { return }
+        guard hasText else { return }
         // the voice of every language of the text is known (the pick after the text step comes a moment later)
         guard let plan, plan.text == textView.string, plan.langs.allSatisfy({ voiceMap[$0] != nil }) else {
             playWhenPlanned = true
@@ -558,8 +577,12 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
     private func stopAll() {
         player.speech?.cancel()
         pending?.cancel(); pending = nil
-        player.pause()
-        player.load(nil)
+        // Idle (nothing loaded, nothing playing), the player is left alone: every keystroke stops all, and stopping an
+        // idle audio engine still asks CoreAudio's server, up to 2 s a keystroke in the stress matrix 2026-11-27.
+        if player.speech != nil || player.isPlaying {
+            player.pause()
+            player.load(nil)
+        }
         resumePart = 0
         playWhenPlanned = false
         stopListening()
@@ -653,7 +676,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
     // MARK: save
 
     @objc func saveMP3() {
-        guard !text.isEmpty, saving == nil else { return }
+        guard hasText, saving == nil else { return }
         let p = NSSavePanel()
         p.allowedContentTypes = [.mp3]
         p.nameFieldStringValue = suggestedName() + ".mp3"
@@ -665,7 +688,11 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
 
     private func suggestedName() -> String {
         if let f = fileName { return f }
-        let words = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.prefix(6).joined(separator: " ")
+        // The first words are all it needs: the head of the text, not a copy of all of it.
+        let all = textView.string as NSString
+        let head = all.substring(with: all.rangeOfComposedCharacterSequences(for: NSRange(location: 0, length: min(all.length, 2_000))))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = head.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.prefix(6).joined(separator: " ")
         let clean = words.components(separatedBy: CharacterSet(charactersIn: "/:\\?*\"<>|")).joined()
             .trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.whitespaces))
         return clean.isEmpty ? "TTS" : String(clean.prefix(60))
@@ -709,7 +736,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
     // MARK: state
 
     private func refreshControls() {
-        let hasText = !text.isEmpty
+        let hasText = self.hasText
         playButton.isEnabled = hasText || player.speech != nil
         saveButton.isEnabled = hasText && saving == nil
         refreshPlayer()
@@ -803,7 +830,7 @@ final class MainWindow: NSWindow, NSWindowDelegate, NSTextViewDelegate, NSPopove
 
     override func validateMenuItem(_ i: NSMenuItem) -> Bool {
         switch i.action {
-        case #selector(saveMP3): return !text.isEmpty && saving == nil
+        case #selector(saveMP3): return hasText && saving == nil
         case #selector(biggerText(_:)): return textSize < Self.sizes.last!
         case #selector(smallerText(_:)): return textSize > Self.sizes.first!
         case #selector(actualSizeText(_:)): return textSize != NSFont.systemFontSize
